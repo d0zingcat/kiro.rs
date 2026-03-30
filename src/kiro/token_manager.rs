@@ -1696,6 +1696,46 @@ impl MultiTokenManager {
         Ok(())
     }
 
+    /// 强制刷新指定凭据的 Token（Admin API）
+    ///
+    /// 无条件调用上游 API 重新获取 access token，不检查是否过期。
+    /// 适用于排查问题、Token 异常但未过期、主动更新凭据状态等场景。
+    pub async fn force_refresh_token_for(&self, id: u64) -> anyhow::Result<()> {
+        let credentials = {
+            let entries = self.entries.lock();
+            entries
+                .iter()
+                .find(|e| e.id == id)
+                .map(|e| e.credentials.clone())
+                .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
+        };
+
+        // 获取刷新锁防止并发刷新
+        let _guard = self.refresh_lock.lock().await;
+
+        // 无条件调用 refresh_token
+        let effective_proxy = credentials.effective_proxy(self.proxy.as_ref());
+        let new_creds =
+            refresh_token(&credentials, &self.config, effective_proxy.as_ref()).await?;
+
+        // 更新 entries 中对应凭据
+        {
+            let mut entries = self.entries.lock();
+            if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                entry.credentials = new_creds;
+                entry.refresh_failure_count = 0;
+            }
+        }
+
+        // 持久化
+        if let Err(e) = self.persist_credentials() {
+            tracing::warn!("强制刷新 Token 后持久化失败: {}", e);
+        }
+
+        tracing::info!("凭据 #{} Token 已强制刷新", id);
+        Ok(())
+    }
+
     /// 获取负载均衡模式（Admin API）
     pub fn get_load_balancing_mode(&self) -> String {
         self.load_balancing_mode.lock().clone()
