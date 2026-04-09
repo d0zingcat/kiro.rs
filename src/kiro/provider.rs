@@ -595,12 +595,6 @@ impl KiroProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::config::Config;
-
-    fn create_test_provider(config: Config, credentials: KiroCredentials) -> KiroProvider {
-        let tm = MultiTokenManager::new(config, vec![credentials], None, None, false).unwrap();
-        KiroProvider::with_proxy(Arc::new(tm), None)
-    }
 
     #[test]
     fn test_is_monthly_request_limit_detects_reason() {
