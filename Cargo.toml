@@ -5,7 +5,7 @@ edition = "2024"
 
 [features]
 default = ["native-tls"]
-native-tls = ["reqwest/native-tls-vendored"]
+native-tls = ["reqwest/native-tls"]
 
 [profile.release]
 lto = true
