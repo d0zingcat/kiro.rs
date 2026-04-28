@@ -241,8 +241,7 @@ fn build_history(
     // tool 消息紧跟在 assistant 之后，需要和下一个 user 消息合并
     let mut tool_buffer: Vec<&ChatMessage> = Vec::new();
 
-    for i in 0..history_end {
-        let msg = messages[i];
+    for msg in &messages[..history_end] {
 
         match msg.role.as_str() {
             "user" => {

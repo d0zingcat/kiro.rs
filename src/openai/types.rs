@@ -144,10 +144,10 @@ impl ChatMessage {
             Some(serde_json::Value::Array(arr)) => {
                 let mut parts = Vec::new();
                 for item in arr {
-                    if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
-                        if item.get("type").and_then(|v| v.as_str()) == Some("text") {
-                            parts.push(text.to_string());
-                        }
+                    if let Some(text) = item.get("text").and_then(|v| v.as_str())
+                        && item.get("type").and_then(|v| v.as_str()) == Some("text")
+                    {
+                        parts.push(text.to_string());
                     }
                 }
                 parts.join("\n")
