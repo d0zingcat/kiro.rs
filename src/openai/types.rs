@@ -29,6 +29,7 @@ impl ErrorResponse {
         }
     }
 
+    #[allow(dead_code)]
     pub fn authentication_error() -> Self {
         Self {
             error: ErrorDetail {
@@ -62,6 +63,7 @@ pub struct ModelsResponse {
 
 /// Chat Completions 请求体
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct ChatCompletionRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
@@ -90,6 +92,7 @@ pub struct ChatCompletionRequest {
 
 impl ChatCompletionRequest {
     /// 获取有效的 max_tokens，优先使用 max_completion_tokens
+    #[allow(dead_code)]
     pub fn effective_max_tokens(&self) -> i32 {
         self.max_completion_tokens
             .or(self.max_tokens)
@@ -100,6 +103,7 @@ impl ChatCompletionRequest {
 /// stop 字段支持 string 或 string 数组
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
+#[allow(dead_code)]
 pub enum StopSequence {
     Single(String),
     Multiple(Vec<String>),

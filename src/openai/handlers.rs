@@ -5,7 +5,6 @@ use std::convert::Infallible;
 use crate::kiro::model::events::Event;
 use crate::kiro::model::requests::kiro::KiroRequest;
 use crate::kiro::parser::decoder::EventStreamDecoder;
-use crate::token;
 use axum::{
     Json as JsonExtractor,
     body::Body,
@@ -14,7 +13,7 @@ use axum::{
     response::{IntoResponse, Json, Response},
 };
 use bytes::Bytes;
-use futures::{Stream, StreamExt, stream};
+use futures::{StreamExt, stream};
 use std::time::Duration;
 use tokio::time::interval;
 
@@ -242,7 +241,7 @@ async fn handle_stream_request(
         Err(e) => return map_provider_error(e),
     };
 
-    let mut ctx = OpenAIStreamContext::new(model, input_tokens, tool_name_map, include_usage);
+    let ctx = OpenAIStreamContext::new(model, input_tokens, tool_name_map, include_usage);
 
     // 创建 SSE 流
     let body_stream = response.bytes_stream();
