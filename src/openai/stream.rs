@@ -129,7 +129,7 @@ impl OpenAIStreamContext {
                     let buffer = self
                         .tool_json_buffers
                         .entry(tool_use.tool_use_id.clone())
-                        .or_insert_with(String::new);
+                        .or_default();
                     is_first = buffer.is_empty();
                     buffer.push_str(&tool_use.input);
                     buffer_len = buffer.len();
@@ -287,7 +287,7 @@ pub fn build_non_stream_response(
 
                 let buffer = tool_json_buffers
                     .entry(tool_use.tool_use_id.clone())
-                    .or_insert_with(String::new);
+                    .or_default();
                 buffer.push_str(&tool_use.input);
 
                 if tool_use.stop {
