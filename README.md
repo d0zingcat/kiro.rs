@@ -1,6 +1,6 @@
 # kiro-rs
 
-一个用 Rust 编写的 Anthropic Claude API 兼容代理服务，将 Anthropic API 请求转换为 Kiro API 请求。
+一个用 Rust 编写的 Anthropic Claude API 兼容代理服务，将 Anthropic API 请求转换为 Kiro API 请求。同时支持 OpenAI Chat Completions API 格式。
 
 ---
 
@@ -32,6 +32,7 @@
 ## 功能特性
 
 - **Anthropic API 兼容**: 完整支持 Anthropic Claude API 格式
+- **OpenAI API 兼容**: 支持 OpenAI Chat Completions API 格式 (`/openai/v1/chat/completions`)
 - **流式响应**: 支持 SSE (Server-Sent Events) 流式输出
 - **Token 自动刷新**: 自动管理和刷新 OAuth Token
 - **多凭据支持**: 支持配置多个凭据，按优先级自动故障转移
@@ -391,6 +392,36 @@ RUST_LOG=debug ./target/release/kiro-rs
 > - `/v1/messages`：实时流式返回，`message_start` 中的 `input_tokens` 是估算值
 > - `/cc/v1/messages`：缓冲模式，等待上游流完成后，用从 `contextUsageEvent` 计算的准确 `input_tokens` 更正 `message_start`，然后一次性返回所有事件
 > - 等待期间会每 25 秒发送 `ping` 事件保活
+
+### OpenAI 兼容端点 (/openai/v1)
+
+| 端点 | 方法 | 描述 |
+|------|------|------|
+| `/openai/v1/models` | GET | 获取可用模型列表（OpenAI 格式） |
+| `/openai/v1/chat/completions` | POST | Chat Completions（支持流式和非流式） |
+
+支持 OpenAI Chat Completions API 格式，可直接对接使用 OpenAI SDK 的工具和框架。
+
+```bash
+# 非流式请求
+curl http://localhost:8080/openai/v1/chat/completions \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4-6",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+
+# 流式请求
+curl http://localhost:8080/openai/v1/chat/completions \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4-6",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "stream": true
+  }'
+```
 
 ### Thinking 模式
 

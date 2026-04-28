@@ -43,6 +43,11 @@ pub fn create_router_with_provider(
     if let Some(provider) = kiro_provider {
         state = state.with_kiro_provider(provider);
     }
+    create_router_with_state(state)
+}
+
+/// 从已有的 AppState 创建 Anthropic API 路由
+pub fn create_router_with_state(state: AppState) -> Router {
 
     // 需要认证的 /v1 路由
     let v1_routes = Router::new()
