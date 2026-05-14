@@ -169,7 +169,7 @@ impl KiroProvider {
                 .client_for(&ctx.credentials)?
                 .post(&url)
                 .body(body)
-                .header("content-type", "application/json")
+                .header("content-type", endpoint.content_type())
                 .header("Connection", "close");
             let request = endpoint.decorate_mcp(base, &rctx);
 
@@ -322,11 +322,14 @@ impl KiroProvider {
             let url = endpoint.api_url(&rctx);
             let body = endpoint.transform_api_body(request_body, &rctx);
 
+            tracing::debug!("使用端点 [{}] POST {}", endpoint.name(), url);
+            tracing::debug!("实际发送请求体: {}", body);
+
             let base = self
                 .client_for(&ctx.credentials)?
                 .post(&url)
                 .body(body)
-                .header("content-type", "application/json")
+                .header("content-type", endpoint.content_type())
                 .header("Connection", "close");
             let request = endpoint.decorate_api(base, &rctx);
 
