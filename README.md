@@ -446,6 +446,8 @@ RUST_LOG=debug ./target/release/kiro-rs
 | `*opus*`（含 4.5/4-5） | `claude-opus-4.5` |
 | `*haiku*` | `claude-haiku-4.5` |
 
+Sonnet 5 的 thinking 行为与已知限制见 [docs/claude-sonnet-5.md](docs/claude-sonnet-5.md)。
+
 ## Admin（可选）
 
 当 `config.json` 配置了非空 `adminApiKey` 时，会启用：
