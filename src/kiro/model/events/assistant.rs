@@ -43,7 +43,17 @@ pub struct AssistantResponseEvent {
 
 impl EventPayload for AssistantResponseEvent {
     fn from_frame(frame: &Frame) -> ParseResult<Self> {
-        frame.payload_as_json()
+        let event: AssistantResponseEvent = frame.payload_as_json()?;
+        // 诊断日志：上游可能将 reasoning/thinking 放在 content 之外的字段，
+        // 此时 content 为空但 extra 含数据，会被静默丢弃。
+        if event.content.is_empty() && !event.extra.is_null() {
+            let extra_preview: String = event.extra.to_string().chars().take(500).collect();
+            tracing::warn!(
+                extra_preview = %extra_preview,
+                "assistantResponseEvent 的 content 为空但存在其他字段（疑似 reasoning/thinking 被丢弃）"
+            );
+        }
+        Ok(event)
     }
 }
 

@@ -1120,6 +1120,18 @@ impl StreamContext {
         // 使用从 contextUsageEvent 计算的 input_tokens，如果没有则使用估算值
         let final_input_tokens = self.context_input_tokens.unwrap_or(self.input_tokens);
 
+        // 防御性诊断：流式空 completion。整个流未产生任何有效输出（output_tokens=0）
+        // 且 stop_reason 仍为 end_turn（排除 context 用满 / max_tokens 等合法空输出），
+        // 说明上游静默产出空结果（疑似 sonnet-5 thinking 被丢弃）。
+        if self.output_tokens == 0 && self.state_manager.get_stop_reason() == "end_turn" {
+            tracing::warn!(
+                model = %self.model,
+                input_tokens = %final_input_tokens,
+                thinking_enabled = self.thinking_enabled,
+                "流式空 completion：output_tokens=0 且 stop_reason=end_turn（疑似上游 thinking 被静默丢弃）"
+            );
+        }
+
         // 生成最终事件
         events.extend(
             self.state_manager
