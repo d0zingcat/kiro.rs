@@ -50,6 +50,8 @@ pub struct CredentialStatusItem {
     pub success_count: u64,
     /// 最后一次 API 调用时间（RFC3339 格式）
     pub last_used_at: Option<String>,
+    /// 网关记录的累计 credits 消耗
+    pub total_credits_used: f64,
     /// 是否配置了凭据级代理
     pub has_proxy: bool,
     /// 代理 URL（用于前端展示）

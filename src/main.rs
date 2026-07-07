@@ -5,6 +5,7 @@ mod common;
 mod http_client;
 mod kiro;
 mod model;
+mod probe;
 pub mod token;
 
 use std::collections::HashMap;
@@ -34,6 +35,7 @@ async fn main() {
     // 加载配置
     let config_path = args
         .config
+        .clone()
         .unwrap_or_else(|| Config::default_config_path().to_string());
     let config = Config::load(&config_path).unwrap_or_else(|e| {
         tracing::error!("加载配置失败: {}", e);
@@ -43,7 +45,25 @@ async fn main() {
     // 加载凭证（支持单对象或数组格式）
     let credentials_path = args
         .credentials
+        .clone()
         .unwrap_or_else(|| KiroCredentials::default_credentials_path().to_string());
+
+    if args.probe_events {
+        if let Err(e) = probe::run_probe(probe::ProbeOptions {
+            config_path,
+            credentials_path,
+            model: args.probe_model,
+            message: args.probe_message,
+            usage_limits: !args.probe_no_usage_limits,
+        })
+        .await
+        {
+            tracing::error!("探测失败: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let credentials_config = CredentialsConfig::load(&credentials_path).unwrap_or_else(|e| {
         tracing::error!("加载凭证失败: {}", e);
         std::process::exit(1);
