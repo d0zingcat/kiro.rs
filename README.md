@@ -42,6 +42,7 @@
 - **工具调用**: 完整支持 function calling / tool use
 - **WebSearch**: 内置 WebSearch 工具转换逻辑
 - **多模型支持**: 支持 Sonnet、Opus、Haiku 系列模型
+- **Credits 计量**: 解析上游 `meteringEvent`，在 `usage` 中返回 `credits` 并按凭据累计消耗
 - **Admin 管理**: 可选的 Web 管理界面和 API，支持凭据管理、余额查询等
 - **多级 Region 配置**: 支持全局和凭据级别的 Auth Region / API Region 配置
 - **凭据级代理**: 支持为每个凭据单独配置 HTTP/SOCKS5 代理，优先级：凭据代理 > 全局代理 > 无代理
@@ -66,6 +67,7 @@
   - [Claude Code 兼容端点 (/cc/v1)](#claude-code-兼容端点-ccv1)
   - [Thinking 模式](#thinking-模式)
   - [工具调用](#工具调用)
+  - [用量字段 (usage) 与 Credits](#用量字段-usage-与-credits)
 - [模型映射](#模型映射)
 - [Admin（可选）](#admin可选)
 - [注意事项](#注意事项)
@@ -433,6 +435,62 @@ RUST_LOG=debug ./target/release/kiro-rs
 }
 ```
 
+### 用量字段 (usage) 与 Credits
+
+`POST /v1/messages` 与 `POST /cc/v1/messages` 的响应中均包含 `usage` 对象，兼容 [Anthropic Messages API](https://docs.anthropic.com/en/api/messages) 的 token 字段，并**扩展**上游 Kiro/Amazon Q 返回的 credits 计费信息。
+
+> **注意**：`input_tokens` / `output_tokens` 与 `credits` 是两套不同单位，**不可互相替代**。网关不会把 credits 填入 token 字段。
+
+#### 字段说明
+
+| 字段 | 类型 | 来源 | 说明 |
+|------|------|------|------|
+| `input_tokens` | `integer` | 本地估算或 `contextUsageEvent` | 输入侧 token 数。流式 `/v1` 在 `message_start` 中为估算值，流结束时的 `message_delta` 会尽量用上游上下文占用百分比更正；`/cc/v1` 缓冲模式会在发 `message_start` 前更正 |
+| `output_tokens` | `integer` | 本地字符估算 | 输出侧 token 数（含文本与 tool_use 内容） |
+| `credits` | `number` | 上游 `meteringEvent.usage` | **本次请求**消耗的 Kiro credits（浮点数，例如 `0.005835`）。仅在上游返回 metering 事件时出现 |
+| `metering_unit` | `string` | 上游 `meteringEvent.unit` | 计费单位，通常为 `"credit"` |
+
+#### 非流式响应示例
+
+```json
+{
+  "type": "message",
+  "role": "assistant",
+  "content": [{"type": "text", "text": "OK"}],
+  "usage": {
+    "input_tokens": 4099,
+    "output_tokens": 1,
+    "credits": 0.005210427661691543,
+    "metering_unit": "credit"
+  }
+}
+```
+
+#### 流式响应
+
+- `message_start` 中的 `usage` 仅含 token 估算值（无 `credits`）
+- 流结束时的 `message_delta` 事件携带完整 `usage`，含更正后的 `input_tokens`、`output_tokens`，以及上游返回的 `credits`（若有）
+
+#### 与账户余额的区别
+
+| 概念 | 获取方式 | 含义 |
+|------|----------|------|
+| `usage.credits` | 单次 `/v1/messages` 响应 | 该次对话请求消耗的 credits |
+| `GET /api/admin/credentials/:id/balance` | Admin API，调用上游 `getUsageLimits` | 账户周期内总用量与限额（`currentUsage` / `usageLimit`） |
+| `totalCreditsUsed` | `GET /api/admin/credentials` | 网关侧按凭据累计的 credits 总和（来自历次 `meteringEvent`，持久化于 `kiro_stats.json`） |
+
+账户余额 API 的更新可能有延迟，与单次响应中的 `usage.credits` 不一定实时一致。
+
+#### 本地探测上游事件
+
+不启动 HTTP 服务时，可用 `--probe-events` 直接调用上游并打印原始事件（含 `meteringEvent` payload）：
+
+```bash
+./target/release/kiro-rs --probe-events \
+  --credentials credentials.json \
+  --probe-model claude-haiku-4.5
+```
+
 ## 模型映射
 
 | Anthropic 模型 | Kiro 模型 |
@@ -453,13 +511,13 @@ Sonnet 5 的 thinking 行为与已知限制见 [docs/claude-sonnet-5.md](docs/cl
 当 `config.json` 配置了非空 `adminApiKey` 时，会启用：
 
 - **Admin API（认证同 API Key）**
-  - `GET /api/admin/credentials` - 获取所有凭据状态
+  - `GET /api/admin/credentials` - 获取所有凭据状态（含 `totalCreditsUsed`：网关累计 credits 消耗）
   - `POST /api/admin/credentials` - 添加新凭据
   - `DELETE /api/admin/credentials/:id` - 删除凭据
   - `POST /api/admin/credentials/:id/disabled` - 设置凭据禁用状态
   - `POST /api/admin/credentials/:id/priority` - 设置凭据优先级
   - `POST /api/admin/credentials/:id/reset` - 重置失败计数
-  - `GET /api/admin/credentials/:id/balance` - 获取凭据余额
+  - `GET /api/admin/credentials/:id/balance` - 获取凭据余额（上游 `getUsageLimits`，与单次 `usage.credits` 不同）
 
 - **Admin UI**
   - `GET /admin` - 访问管理页面（需要在编译前构建 `admin-ui/dist`）
