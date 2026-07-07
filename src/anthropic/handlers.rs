@@ -326,12 +326,8 @@ pub async fn post_messages(
         payload.tools,
     ) as i32;
 
-    // 检查是否启用了thinking
-    let thinking_enabled = payload
-        .thinking
-        .as_ref()
-        .map(|t| t.is_enabled())
-        .unwrap_or(false);
+    // 检查是否启用了thinking（响应解析侧）
+    let thinking_enabled = should_extract_thinking(&payload.model, &payload.thinking);
 
     let tool_name_map = conversion_result.tool_name_map;
 
@@ -656,6 +652,25 @@ async fn handle_non_stream_request(
     // 使用从 contextUsageEvent 计算的 input_tokens，如果没有则使用估算值
     let final_input_tokens = context_input_tokens.unwrap_or(input_tokens);
 
+    // 防御性检查：上游对非空请求返回空 completion（无 content、无 tool_use、output_tokens=0
+    // 且 stop_reason=end_turn），视为上游异常，返回 502 而不是静默透传空结果。
+    // 注意：context 用满 (model_context_window_exceeded) 或 max_tokens 截断属合法空输出，不在此列。
+    if content.is_empty() && output_tokens == 0 && stop_reason == "end_turn" {
+        tracing::warn!(
+            model = %model,
+            input_tokens = %final_input_tokens,
+            "上游返回空 completion（无 content/tool_use，output_tokens=0，stop_reason=end_turn），按上游异常处理"
+        );
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse::new(
+                "api_error",
+                "上游返回空 completion（output_tokens=0 且无内容），疑似上游异常",
+            )),
+        )
+            .into_response();
+    }
+
     // 构建 Anthropic 响应
     let response_body = json!({
         "id": format!("msg_{}", Uuid::new_v4().to_string().replace('-', "")),
@@ -672,6 +687,25 @@ async fn handle_non_stream_request(
     });
 
     (StatusCode::OK, Json(response_body)).into_response()
+}
+
+/// 判断响应解析侧是否应启用 thinking 块拆分
+///
+/// - Sonnet 5：上游默认 adaptive thinking，即使客户端不传 `thinking` 字段也会
+///   输出 `<thinking>` 标签。因此在响应侧默认视 `thinking_enabled = true`，
+///   以便正确拆分 thinking 块（参见 `docs/claude-sonnet-5.md` Known Gap #2），
+///   除非客户端显式 `type = "disabled"`。
+/// - 其他模型：仅当客户端显式 enabled/adaptive 时启用。
+fn should_extract_thinking(model: &str, thinking: &Option<Thinking>) -> bool {
+    let model_lower = model.to_lowercase();
+    if model_lower.contains("sonnet-5") {
+        thinking
+            .as_ref()
+            .map(|t| t.thinking_type != "disabled")
+            .unwrap_or(true)
+    } else {
+        thinking.as_ref().map(|t| t.is_enabled()).unwrap_or(false)
+    }
 }
 
 /// 检测模型名是否包含 "thinking" 后缀，若包含则覆写 thinking 配置
@@ -840,12 +874,8 @@ pub async fn post_messages_cc(
         payload.tools,
     ) as i32;
 
-    // 检查是否启用了thinking
-    let thinking_enabled = payload
-        .thinking
-        .as_ref()
-        .map(|t| t.is_enabled())
-        .unwrap_or(false);
+    // 检查是否启用了thinking（响应解析侧）
+    let thinking_enabled = should_extract_thinking(&payload.model, &payload.thinking);
 
     let tool_name_map = conversion_result.tool_name_map;
 
