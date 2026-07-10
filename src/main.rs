@@ -142,12 +142,12 @@ async fn main() {
         std::process::exit(1);
     });
     let token_manager = Arc::new(token_manager);
-    let kiro_provider = KiroProvider::with_proxy(
+    let kiro_provider = Arc::new(KiroProvider::with_proxy(
         token_manager.clone(),
         proxy_config.clone(),
         endpoints,
         config.default_endpoint.clone(),
-    );
+    ));
 
     // 初始化 count_tokens 配置
     token::init_config(token::CountTokensConfig {
@@ -158,15 +158,17 @@ async fn main() {
         tls_backend: config.tls_backend,
     });
 
-    // 构建共享的 AppState（Anthropic 和 OpenAI 路由共用同一个 KiroProvider）
-    let app_state = anthropic::middleware::AppState::new(&api_key, config.extract_thinking)
+    // 构建 Anthropic / OpenAI 各自的 AppState（共享同一个 Arc<KiroProvider>）
+    let anthropic_state = anthropic::middleware::AppState::new(&api_key, config.extract_thinking)
+        .with_kiro_provider(kiro_provider.clone());
+    let openai_state = openai::middleware::AppState::new(&api_key, config.extract_thinking)
         .with_kiro_provider(kiro_provider);
 
     // 构建 Anthropic API 路由
-    let anthropic_app = anthropic::create_router_with_state(app_state.clone());
+    let anthropic_app = anthropic::create_router_with_state(anthropic_state);
 
     // 构建 OpenAI 兼容 API 路由
-    let openai_app = openai::create_router(app_state);
+    let openai_app = openai::create_router(openai_state);
 
     // 构建 Admin API 路由（如果配置了非空的 admin_api_key）
     // 安全检查：空字符串被视为未配置，防止空 key 绕过认证

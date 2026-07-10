@@ -9,8 +9,13 @@
 
 mod converter;
 mod handlers;
+pub mod middleware;
 mod router;
 mod stream;
 pub mod types;
 
 pub use router::create_router;
+
+#[cfg(test)]
+#[path = "isolation_tests.rs"]
+mod isolation_tests;

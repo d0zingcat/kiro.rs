@@ -6,9 +6,8 @@ use axum::{
     routing::{get, post},
 };
 
-use crate::anthropic::middleware::{AppState, auth_middleware};
-
 use super::handlers::{get_models, post_chat_completions};
+use super::middleware::{AppState, auth_middleware};
 
 /// 创建 OpenAI API 路由（接受已构建的 AppState）
 pub fn create_router(state: AppState) -> Router {

@@ -17,9 +17,8 @@ use futures::{StreamExt, stream};
 use std::time::Duration;
 use tokio::time::interval;
 
-use crate::anthropic::middleware::AppState;
-
 use super::converter::{ConversionError, convert_request};
+use super::middleware::AppState;
 use super::stream::{OpenAIStreamContext, build_non_stream_response};
 use super::types::{
     ChatCompletionRequest, ErrorResponse, Model, ModelsResponse,

@@ -29,7 +29,6 @@ impl ErrorResponse {
         }
     }
 
-    #[allow(dead_code)]
     pub fn authentication_error() -> Self {
         Self {
             error: ErrorDetail {
