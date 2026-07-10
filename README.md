@@ -448,6 +448,13 @@ curl http://localhost:8080/v1/responses \
   }'
 ```
 
+OpenAI 端点补充说明：
+
+- **工具调用**：支持 OpenAI `tools` / `tool_calls`（function calling）；Responses 侧对应 `function_call` / `function_call_output` 条目
+- **Thinking**：模型名包含 `-thinking`（大小写不敏感，如 `claude-sonnet-4-6-thinking`）时启用。Chat Completions 将思考内容放到 `reasoning_content`；Responses 输出独立的 `reasoning` 条目
+- **Usage / credits**：响应 `usage` 含 `prompt_tokens` / `completion_tokens` / `total_tokens`；上游有 metering 时额外返回 `credits`（及可选 `metering_unit`）
+- **隔离**：OpenAI 管线独立实现，不依赖 Anthropic 转换/流式模块
+
 ### Thinking 模式
 
 支持 Claude 的 extended thinking 功能：

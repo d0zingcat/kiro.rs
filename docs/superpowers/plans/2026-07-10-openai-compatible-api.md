@@ -713,7 +713,7 @@ EOF
 
 ### Task 9: Final verification + docs polish
 
-- [ ] **Step 1: Isolation + full test suite**
+- [x] **Step 1: Isolation + full test suite**
 
 ```bash
 cargo test --no-default-features
@@ -736,11 +736,11 @@ curl -N http://127.0.0.1:$PORT/v1/responses \
   -d '{"model":"claude-sonnet-4-6","input":"ping","stream":true}'
 ```
 
-- [ ] **Step 3: README success-criteria checklist**
+- [x] **Step 3: README success-criteria checklist**
 
 Confirm documented: stream/non-stream both APIs, tools, `-thinking` / `reasoning_content`, credits, no Anthropic coupling.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git commit -m "$(cat <<'EOF'
