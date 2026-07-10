@@ -7,12 +7,13 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::common::converter::get_context_window_size;
-use crate::kiro::model::events::Event;
+use crate::kiro::model::events::{Event, MeteringEvent};
 
 use super::types::{
     ChatCompletionChunk, ChatCompletionResponse, Choice, ChunkChoice, Delta, FunctionCall,
-    ResponseMessage, ToolCall, Usage,
+    ResponseMessage, ToolCall,
 };
+use super::usage::build_usage;
 
 /// OpenAI 流式响应上下文
 pub struct OpenAIStreamContext {
@@ -42,6 +43,8 @@ pub struct OpenAIStreamContext {
     include_usage: bool,
     /// stop_reason
     stop_reason: String,
+    /// 计费事件（来自 meteringEvent）
+    metering: Option<MeteringEvent>,
 }
 
 impl OpenAIStreamContext {
@@ -65,6 +68,7 @@ impl OpenAIStreamContext {
             context_input_tokens: None,
             include_usage,
             stop_reason: "stop".to_string(),
+            metering: None,
         }
     }
 
@@ -198,6 +202,10 @@ impl OpenAIStreamContext {
                 }
                 Vec::new()
             }
+            Event::Metering(m) => {
+                self.metering = Some(m.clone());
+                Vec::new()
+            }
             _ => Vec::new(),
         }
     }
@@ -229,11 +237,11 @@ impl OpenAIStreamContext {
             }],
             usage: if self.include_usage {
                 let input = self.context_input_tokens.unwrap_or(self.input_tokens);
-                Some(Usage {
-                    prompt_tokens: input,
-                    completion_tokens: self.output_tokens,
-                    total_tokens: input + self.output_tokens,
-                })
+                Some(build_usage(
+                    input,
+                    self.output_tokens,
+                    self.metering.as_ref(),
+                ))
             } else {
                 None
             },
@@ -276,6 +284,7 @@ pub fn build_non_stream_response(
     let mut context_input_tokens: Option<i32> = None;
     let mut tool_json_buffers: HashMap<String, String> = HashMap::new();
     let mut tool_call_index: i32 = 0;
+    let mut metering: Option<MeteringEvent> = None;
 
     for event in events {
         match event {
@@ -336,6 +345,9 @@ pub fn build_non_stream_response(
                     stop_reason = "length".to_string();
                 }
             }
+            Event::Metering(m) => {
+                metering = Some(m.clone());
+            }
             _ => {}
         }
     }
@@ -378,11 +390,7 @@ pub fn build_non_stream_response(
             },
             finish_reason: Some(stop_reason),
         }],
-        usage: Usage {
-            prompt_tokens: final_input_tokens,
-            completion_tokens: output_tokens,
-            total_tokens: final_input_tokens + output_tokens,
-        },
+        usage: build_usage(final_input_tokens, output_tokens, metering.as_ref()),
     }
 }
 
@@ -400,7 +408,7 @@ fn estimate_tokens(text: &str) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kiro::model::events::{AssistantResponseEvent, ToolUseEvent};
+    use crate::kiro::model::events::{AssistantResponseEvent, MeteringEvent, ToolUseEvent};
 
     fn make_assistant_event(content: &str) -> Event {
         let mut e = AssistantResponseEvent::default();
@@ -492,5 +500,35 @@ mod tests {
         let results = ctx.process_event(&event);
         let combined: String = results.join("");
         assert!(combined.contains("original_long_name"));
+    }
+
+    #[test]
+    fn test_stream_usage_includes_credits() {
+        let mut ctx = OpenAIStreamContext::new("claude-sonnet-4-6", 100, HashMap::new(), true);
+        ctx.process_event(&make_assistant_event("Hi"));
+        ctx.process_event(&Event::Metering(MeteringEvent {
+            unit: Some("credit".into()),
+            unit_plural: Some("credits".into()),
+            usage: 0.02,
+        }));
+
+        let finals = ctx.generate_final_events();
+        assert!(finals[0].contains("\"credits\":0.02"));
+        assert!(finals[0].contains("\"metering_unit\":\"credit\""));
+    }
+
+    #[test]
+    fn test_non_stream_usage_includes_credits() {
+        let events = vec![
+            make_assistant_event("Hello"),
+            Event::Metering(MeteringEvent {
+                unit: Some("credit".into()),
+                unit_plural: Some("credits".into()),
+                usage: 0.03,
+            }),
+        ];
+        let resp = build_non_stream_response("claude-sonnet-4-6", 50, &events, &HashMap::new());
+        assert_eq!(resp.usage.credits, Some(0.03));
+        assert_eq!(resp.usage.metering_unit.as_deref(), Some("credit"));
     }
 }

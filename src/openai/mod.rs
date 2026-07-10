@@ -14,6 +14,7 @@ pub mod middleware;
 mod router;
 mod stream;
 pub mod types;
+mod usage;
 
 pub use router::create_router;
 

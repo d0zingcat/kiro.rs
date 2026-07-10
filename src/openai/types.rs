@@ -216,6 +216,10 @@ pub struct Usage {
     pub prompt_tokens: i32,
     pub completion_tokens: i32,
     pub total_tokens: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credits: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metering_unit: Option<String>,
 }
 
 // === 流式响应类型 ===
@@ -316,6 +320,8 @@ mod tests {
                 prompt_tokens: 10,
                 completion_tokens: 5,
                 total_tokens: 15,
+                credits: None,
+                metering_unit: None,
             },
         };
         let json = serde_json::to_value(&resp).unwrap();
