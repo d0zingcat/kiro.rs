@@ -13,6 +13,15 @@
 //! - `POST /cc/v1/messages` - 创建消息（流式响应会等待 contextUsageEvent 后再发送 message_start，确保 input_tokens 准确）
 //! - `POST /cc/v1/messages/count_tokens` - 计算 token 数量（与 /v1 相同）
 //!
+//! ## 响应 usage 扩展字段
+//!
+//! 除 Anthropic 标准的 `input_tokens` / `output_tokens` 外，若上游返回 `meteringEvent`，
+//! 响应 `usage` 还会包含：
+//! - `credits` (`number`) - 本次请求消耗的 Kiro credits
+//! - `metering_unit` (`string`) - 计费单位，通常为 `"credit"`
+//!
+//! credits 与 token 是不同计量单位，不会互相替换。详见 README「用量字段 (usage) 与 Credits」。
+//!
 //! # 使用示例
 //! ```rust,ignore
 //! use kiro_rs::anthropic;
@@ -28,6 +37,7 @@ pub mod middleware;
 mod router;
 mod stream;
 pub mod types;
+mod usage;
 mod websearch;
 
 pub use router::create_router_with_state;

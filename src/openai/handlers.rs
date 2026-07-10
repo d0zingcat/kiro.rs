@@ -302,10 +302,12 @@ async fn handle_stream_request(
     include_usage: bool,
     thinking_enabled: bool,
 ) -> Response {
-    let response = match provider.call_api_stream(request_body).await {
+    let api_result = match provider.call_api_stream(request_body).await {
         Ok(resp) => resp,
         Err(e) => return map_provider_error(e),
     };
+    let credential_id = api_result.credential_id;
+    let response = api_result.response;
 
     let ctx = OpenAIStreamContext::new_with_thinking(
         model,
@@ -325,8 +327,10 @@ async fn handle_stream_request(
             EventStreamDecoder::new(),
             false,
             interval(Duration::from_secs(PING_INTERVAL_SECS)),
+            provider,
+            credential_id,
         ),
-        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval)| async move {
+        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval, provider, credential_id)| async move {
             if finished {
                 return None;
             }
@@ -359,30 +363,36 @@ async fn handle_stream_request(
                                 .map(|s| Ok(Bytes::from(s)))
                                 .collect();
 
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval)))
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, provider, credential_id)))
                         }
                         Some(Err(e)) => {
                             tracing::error!("读取响应流失败: {}", e);
+                            if let Some(metering) = ctx.metering() {
+                                provider.record_credits_used(credential_id, metering);
+                            }
                             let final_events = ctx.generate_final_events();
                             let bytes: Vec<Result<Bytes, Infallible>> = final_events
                                 .into_iter()
                                 .map(|s| Ok(Bytes::from(s)))
                                 .collect();
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval)))
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, provider, credential_id)))
                         }
                         None => {
+                            if let Some(metering) = ctx.metering() {
+                                provider.record_credits_used(credential_id, metering);
+                            }
                             let final_events = ctx.generate_final_events();
                             let bytes: Vec<Result<Bytes, Infallible>> = final_events
                                 .into_iter()
                                 .map(|s| Ok(Bytes::from(s)))
                                 .collect();
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval)))
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, provider, credential_id)))
                         }
                     }
                 }
                 _ = ping_interval.tick() => {
                     let bytes: Vec<Result<Bytes, Infallible>> = vec![Ok(Bytes::from(": ping\n\n"))];
-                    Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval)))
+                    Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, provider, credential_id)))
                 }
             }
         },
@@ -407,10 +417,12 @@ async fn handle_non_stream_request(
     tool_name_map: std::collections::HashMap<String, String>,
     extract_thinking: bool,
 ) -> Response {
-    let response = match provider.call_api(request_body).await {
+    let api_result = match provider.call_api(request_body).await {
         Ok(resp) => resp,
         Err(e) => return map_provider_error(e),
     };
+    let credential_id = api_result.credential_id;
+    let response = api_result.response;
 
     let body_bytes = match response.bytes().await {
         Ok(bytes) => bytes,
@@ -446,6 +458,13 @@ async fn handle_non_stream_request(
         }
     }
 
+    if let Some(m) = events.iter().find_map(|e| match e {
+        Event::Metering(m) => Some(m),
+        _ => None,
+    }) {
+        provider.record_credits_used(credential_id, m);
+    }
+
     let resp = build_non_stream_response(
         model,
         input_tokens,
@@ -465,10 +484,12 @@ async fn handle_responses_stream_request(
     tool_name_map: std::collections::HashMap<String, String>,
     thinking_enabled: bool,
 ) -> Response {
-    let response = match provider.call_api_stream(request_body).await {
+    let api_result = match provider.call_api_stream(request_body).await {
         Ok(resp) => resp,
         Err(e) => return map_provider_error(e),
     };
+    let credential_id = api_result.credential_id;
+    let response = api_result.response;
 
     let ctx = ResponsesStreamContext::new_with_thinking(
         model,
@@ -487,8 +508,10 @@ async fn handle_responses_stream_request(
             EventStreamDecoder::new(),
             false,
             interval(Duration::from_secs(PING_INTERVAL_SECS)),
+            provider,
+            credential_id,
         ),
-        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval)| async move {
+        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval, provider, credential_id)| async move {
             if finished {
                 return None;
             }
@@ -521,30 +544,36 @@ async fn handle_responses_stream_request(
                                 .map(|s| Ok(Bytes::from(s)))
                                 .collect();
 
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval)))
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, provider, credential_id)))
                         }
                         Some(Err(e)) => {
                             tracing::error!("读取响应流失败: {}", e);
+                            if let Some(metering) = ctx.metering() {
+                                provider.record_credits_used(credential_id, metering);
+                            }
                             let final_events = ctx.generate_final_events();
                             let bytes: Vec<Result<Bytes, Infallible>> = final_events
                                 .into_iter()
                                 .map(|s| Ok(Bytes::from(s)))
                                 .collect();
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval)))
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, provider, credential_id)))
                         }
                         None => {
+                            if let Some(metering) = ctx.metering() {
+                                provider.record_credits_used(credential_id, metering);
+                            }
                             let final_events = ctx.generate_final_events();
                             let bytes: Vec<Result<Bytes, Infallible>> = final_events
                                 .into_iter()
                                 .map(|s| Ok(Bytes::from(s)))
                                 .collect();
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval)))
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, provider, credential_id)))
                         }
                     }
                 }
                 _ = ping_interval.tick() => {
                     let bytes: Vec<Result<Bytes, Infallible>> = vec![Ok(Bytes::from(": ping\n\n"))];
-                    Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval)))
+                    Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, provider, credential_id)))
                 }
             }
         },
@@ -569,10 +598,12 @@ async fn handle_responses_non_stream_request(
     tool_name_map: std::collections::HashMap<String, String>,
     extract_thinking: bool,
 ) -> Response {
-    let response = match provider.call_api(request_body).await {
+    let api_result = match provider.call_api(request_body).await {
         Ok(resp) => resp,
         Err(e) => return map_provider_error(e),
     };
+    let credential_id = api_result.credential_id;
+    let response = api_result.response;
 
     let body_bytes = match response.bytes().await {
         Ok(bytes) => bytes,
@@ -606,6 +637,13 @@ async fn handle_responses_non_stream_request(
                 tracing::warn!("解码事件失败: {}", e);
             }
         }
+    }
+
+    if let Some(m) = events.iter().find_map(|e| match e {
+        Event::Metering(m) => Some(m),
+        _ => None,
+    }) {
+        provider.record_credits_used(credential_id, m);
     }
 
     let resp = build_responses_non_stream(

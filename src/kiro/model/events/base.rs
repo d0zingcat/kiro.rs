@@ -124,7 +124,19 @@ impl Event {
                 let payload = super::ContextUsageEvent::from_frame(&frame)?;
                 Ok(Self::ContextUsage(payload))
             }
-            EventType::Unknown => Ok(Self::Unknown {}),
+            EventType::Unknown => {
+                // 诊断日志：上游可能为 sonnet-5 等模型新增 reasoning/thinking 事件类型，
+                // kiro.rs 当前会静默丢弃。记录原始事件类型与 payload 片段以便定位。
+                let payload = frame.payload_as_str();
+                let payload_preview: String = payload.chars().take(500).collect();
+                tracing::warn!(
+                    event_type = %event_type_str,
+                    payload_len = payload.len(),
+                    payload_preview = %payload_preview,
+                    "收到未识别的事件类型，将被静默丢弃（疑似 reasoning/thinking 等新事件）"
+                );
+                Ok(Self::Unknown {})
+            }
         }
     }
 

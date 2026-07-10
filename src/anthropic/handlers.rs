@@ -25,6 +25,7 @@ use super::converter::{ConversionError, convert_request};
 use super::middleware::AppState;
 use super::stream::{BufferedStreamContext, SseEvent, StreamContext};
 use super::types::{CountTokensRequest, CountTokensResponse, ErrorResponse, MessagesRequest, Model, ModelsResponse, OutputConfig, Thinking};
+use super::usage::build_usage_value;
 use super::websearch;
 
 /// 将 KiroProvider 错误映射为 HTTP 响应
@@ -74,6 +75,60 @@ pub async fn get_models() -> impl IntoResponse {
     tracing::info!("Received GET /v1/models request");
 
     let models = vec![
+        Model {
+            id: "claude-sonnet-5".to_string(),
+            object: "model".to_string(),
+            created: 1782777600, // Jun 30, 2026
+            owned_by: "anthropic".to_string(),
+            display_name: "Claude Sonnet 5".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 128_000,
+        },
+        Model {
+            id: "claude-sonnet-5-thinking".to_string(),
+            object: "model".to_string(),
+            created: 1782777600, // Jun 30, 2026
+            owned_by: "anthropic".to_string(),
+            display_name: "Claude Sonnet 5 (Thinking)".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 128_000,
+        },
+        Model {
+            id: "claude-opus-4-8".to_string(),
+            object: "model".to_string(),
+            created: 1779897600, // May 28, 2026
+            owned_by: "anthropic".to_string(),
+            display_name: "Claude Opus 4.8".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 128_000,
+        },
+        Model {
+            id: "claude-opus-4-8-thinking".to_string(),
+            object: "model".to_string(),
+            created: 1779897600, // May 28, 2026
+            owned_by: "anthropic".to_string(),
+            display_name: "Claude Opus 4.8 (Thinking)".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 128_000,
+        },
+        Model {
+            id: "claude-opus-4-7".to_string(),
+            object: "model".to_string(),
+            created: 1776276000, // Apr 16, 2026
+            owned_by: "anthropic".to_string(),
+            display_name: "Claude Opus 4.7".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 64000,
+        },
+        Model {
+            id: "claude-opus-4-7-thinking".to_string(),
+            object: "model".to_string(),
+            created: 1776276000, // Apr 16, 2026
+            owned_by: "anthropic".to_string(),
+            display_name: "Claude Opus 4.7 (Thinking)".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 64000,
+        },
         Model {
             id: "claude-opus-4-6".to_string(),
             object: "model".to_string(),
@@ -272,12 +327,8 @@ pub async fn post_messages(
         payload.tools,
     ) as i32;
 
-    // 检查是否启用了thinking
-    let thinking_enabled = payload
-        .thinking
-        .as_ref()
-        .map(|t| t.is_enabled())
-        .unwrap_or(false);
+    // 检查是否启用了thinking（响应解析侧）
+    let thinking_enabled = should_extract_thinking(&payload.model, &payload.thinking);
 
     let tool_name_map = conversion_result.tool_name_map;
 
@@ -309,10 +360,12 @@ async fn handle_stream_request(
     tool_name_map: std::collections::HashMap<String, String>,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
-    let response = match provider.call_api_stream(request_body).await {
+    let api_result = match provider.call_api_stream(request_body).await {
         Ok(resp) => resp,
         Err(e) => return map_provider_error(e),
     };
+    let credential_id = api_result.credential_id;
+    let response = api_result.response;
 
     // 创建流处理上下文
     let mut ctx = StreamContext::new_with_thinking(model, input_tokens, thinking_enabled, tool_name_map);
@@ -321,7 +374,7 @@ async fn handle_stream_request(
     let initial_events = ctx.generate_initial_events();
 
     // 创建 SSE 流
-    let stream = create_sse_stream(response, ctx, initial_events);
+    let stream = create_sse_stream(provider, credential_id, response, ctx, initial_events);
 
     // 返回 SSE 响应
     Response::builder()
@@ -343,6 +396,8 @@ fn create_ping_sse() -> Bytes {
 
 /// 创建 SSE 事件流
 fn create_sse_stream(
+    provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
+    credential_id: u64,
     response: reqwest::Response,
     ctx: StreamContext,
     initial_events: Vec<SseEvent>,
@@ -358,8 +413,8 @@ fn create_sse_stream(
     let body_stream = response.bytes_stream();
 
     let processing_stream = stream::unfold(
-        (body_stream, ctx, EventStreamDecoder::new(), false, interval(Duration::from_secs(PING_INTERVAL_SECS))),
-        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval)| async move {
+        (body_stream, ctx, EventStreamDecoder::new(), false, interval(Duration::from_secs(PING_INTERVAL_SECS)), provider, credential_id),
+        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval, provider, credential_id)| async move {
             if finished {
                 return None;
             }
@@ -396,26 +451,32 @@ fn create_sse_stream(
                                 .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                 .collect();
 
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval)))
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, provider, credential_id)))
                         }
                         Some(Err(e)) => {
                             tracing::error!("读取响应流失败: {}", e);
+                            if let Some(metering) = ctx.metering() {
+                                provider.record_credits_used(credential_id, metering);
+                            }
                             // 发送最终事件并结束
                             let final_events = ctx.generate_final_events();
                             let bytes: Vec<Result<Bytes, Infallible>> = final_events
                                 .into_iter()
                                 .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                 .collect();
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval)))
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, provider, credential_id)))
                         }
                         None => {
+                            if let Some(metering) = ctx.metering() {
+                                provider.record_credits_used(credential_id, metering);
+                            }
                             // 流结束，发送最终事件
                             let final_events = ctx.generate_final_events();
                             let bytes: Vec<Result<Bytes, Infallible>> = final_events
                                 .into_iter()
                                 .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                 .collect();
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval)))
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, provider, credential_id)))
                         }
                     }
                 }
@@ -423,7 +484,7 @@ fn create_sse_stream(
                 _ = ping_interval.tick() => {
                     tracing::trace!("发送 ping 保活事件");
                     let bytes: Vec<Result<Bytes, Infallible>> = vec![Ok(create_ping_sse())];
-                    Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval)))
+                    Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, provider, credential_id)))
                 }
             }
         },
@@ -445,10 +506,12 @@ async fn handle_non_stream_request(
     tool_name_map: std::collections::HashMap<String, String>,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
-    let response = match provider.call_api(request_body).await {
+    let api_result = match provider.call_api(request_body).await {
         Ok(resp) => resp,
         Err(e) => return map_provider_error(e),
     };
+    let credential_id = api_result.credential_id;
+    let response = api_result.response;
 
     // 读取响应体
     let body_bytes = match response.bytes().await {
@@ -478,6 +541,7 @@ async fn handle_non_stream_request(
     let mut stop_reason = "end_turn".to_string();
     // 从 contextUsageEvent 计算的实际输入 tokens
     let mut context_input_tokens: Option<i32> = None;
+    let mut metering: Option<crate::kiro::model::events::MeteringEvent> = None;
 
     // 收集工具调用的增量 JSON
     let mut tool_json_buffers: std::collections::HashMap<String, String> =
@@ -546,6 +610,14 @@ async fn handle_non_stream_request(
                                 actual_input_tokens
                             );
                         }
+                        Event::Metering(m) => {
+                            tracing::debug!(
+                                credits = m.usage,
+                                unit = ?m.unit,
+                                "收到 meteringEvent"
+                            );
+                            metering = Some(m);
+                        }
                         Event::Exception { exception_type, .. } => {
                             if exception_type == "ContentLengthExceededException" {
                                 stop_reason = "max_tokens".to_string();
@@ -602,7 +674,30 @@ async fn handle_non_stream_request(
     // 使用从 contextUsageEvent 计算的 input_tokens，如果没有则使用估算值
     let final_input_tokens = context_input_tokens.unwrap_or(input_tokens);
 
+    // 防御性检查：上游对非空请求返回空 completion（无 content、无 tool_use、output_tokens=0
+    // 且 stop_reason=end_turn），视为上游异常，返回 502 而不是静默透传空结果。
+    // 注意：context 用满 (model_context_window_exceeded) 或 max_tokens 截断属合法空输出，不在此列。
+    if content.is_empty() && output_tokens == 0 && stop_reason == "end_turn" {
+        tracing::warn!(
+            model = %model,
+            input_tokens = %final_input_tokens,
+            "上游返回空 completion（无 content/tool_use，output_tokens=0，stop_reason=end_turn），按上游异常处理"
+        );
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse::new(
+                "api_error",
+                "上游返回空 completion（output_tokens=0 且无内容），疑似上游异常",
+            )),
+        )
+            .into_response();
+    }
+
     // 构建 Anthropic 响应
+    if let Some(ref m) = metering {
+        provider.record_credits_used(credential_id, m);
+    }
+
     let response_body = json!({
         "id": format!("msg_{}", Uuid::new_v4().to_string().replace('-', "")),
         "type": "message",
@@ -611,13 +706,33 @@ async fn handle_non_stream_request(
         "model": model,
         "stop_reason": stop_reason,
         "stop_sequence": null,
-        "usage": {
-            "input_tokens": final_input_tokens,
-            "output_tokens": output_tokens
-        }
+        "usage": build_usage_value(
+            final_input_tokens,
+            output_tokens,
+            metering.as_ref(),
+        )
     });
 
     (StatusCode::OK, Json(response_body)).into_response()
+}
+
+/// 判断响应解析侧是否应启用 thinking 块拆分
+///
+/// - Sonnet 5：上游默认 adaptive thinking，即使客户端不传 `thinking` 字段也会
+///   输出 `<thinking>` 标签。因此在响应侧默认视 `thinking_enabled = true`，
+///   以便正确拆分 thinking 块（参见 `docs/claude-sonnet-5.md` Known Gap #2），
+///   除非客户端显式 `type = "disabled"`。
+/// - 其他模型：仅当客户端显式 enabled/adaptive 时启用。
+fn should_extract_thinking(model: &str, thinking: &Option<Thinking>) -> bool {
+    let model_lower = model.to_lowercase();
+    if model_lower.contains("sonnet-5") {
+        thinking
+            .as_ref()
+            .map(|t| t.thinking_type != "disabled")
+            .unwrap_or(true)
+    } else {
+        thinking.as_ref().map(|t| t.is_enabled()).unwrap_or(false)
+    }
 }
 
 /// 检测模型名是否包含 "thinking" 后缀，若包含则覆写 thinking 配置
@@ -631,10 +746,11 @@ fn override_thinking_from_model_name(payload: &mut MessagesRequest) {
         return;
     }
 
-    let is_opus_4_6 =
-        model_lower.contains("opus") && (model_lower.contains("4-6") || model_lower.contains("4.6"));
+    let is_adaptive_thinking = (model_lower.contains("opus")
+        && (model_lower.contains("4-6") || model_lower.contains("4.6")))
+        || model_lower.contains("sonnet-5");
 
-    let thinking_type = if is_opus_4_6 {
+    let thinking_type = if is_adaptive_thinking {
         "adaptive"
     } else {
         "enabled"
@@ -651,7 +767,7 @@ fn override_thinking_from_model_name(payload: &mut MessagesRequest) {
         budget_tokens: 20000,
     });
     
-    if is_opus_4_6 {
+    if is_adaptive_thinking {
         payload.output_config = Some(OutputConfig {
             effort: "high".to_string(),
         });
@@ -785,12 +901,8 @@ pub async fn post_messages_cc(
         payload.tools,
     ) as i32;
 
-    // 检查是否启用了thinking
-    let thinking_enabled = payload
-        .thinking
-        .as_ref()
-        .map(|t| t.is_enabled())
-        .unwrap_or(false);
+    // 检查是否启用了thinking（响应解析侧）
+    let thinking_enabled = should_extract_thinking(&payload.model, &payload.thinking);
 
     let tool_name_map = conversion_result.tool_name_map;
 
@@ -825,16 +937,18 @@ async fn handle_stream_request_buffered(
     tool_name_map: std::collections::HashMap<String, String>,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
-    let response = match provider.call_api_stream(request_body).await {
+    let api_result = match provider.call_api_stream(request_body).await {
         Ok(resp) => resp,
         Err(e) => return map_provider_error(e),
     };
+    let credential_id = api_result.credential_id;
+    let response = api_result.response;
 
     // 创建缓冲流处理上下文
     let ctx = BufferedStreamContext::new(model, estimated_input_tokens, thinking_enabled, tool_name_map);
 
     // 创建缓冲 SSE 流
-    let stream = create_buffered_sse_stream(response, ctx);
+    let stream = create_buffered_sse_stream(provider, credential_id, response, ctx);
 
     // 返回 SSE 响应
     Response::builder()
@@ -854,6 +968,8 @@ async fn handle_stream_request_buffered(
 /// 3. 流结束后，用正确的 input_tokens 更正 message_start 事件
 /// 4. 一次性发送所有事件
 fn create_buffered_sse_stream(
+    provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
+    credential_id: u64,
     response: reqwest::Response,
     ctx: BufferedStreamContext,
 ) -> impl Stream<Item = Result<Bytes, Infallible>> {
@@ -866,8 +982,10 @@ fn create_buffered_sse_stream(
             EventStreamDecoder::new(),
             false,
             interval(Duration::from_secs(PING_INTERVAL_SECS)),
+            provider,
+            credential_id,
         ),
-        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval)| async move {
+        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval, provider, credential_id)| async move {
             if finished {
                 return None;
             }
@@ -882,7 +1000,7 @@ fn create_buffered_sse_stream(
                     _ = ping_interval.tick() => {
                         tracing::trace!("发送 ping 保活事件（缓冲模式）");
                         let bytes: Vec<Result<Bytes, Infallible>> = vec![Ok(create_ping_sse())];
-                        return Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval)));
+                        return Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, provider, credential_id)));
                     }
 
                     // 然后处理数据流
@@ -911,22 +1029,28 @@ fn create_buffered_sse_stream(
                             }
                             Some(Err(e)) => {
                                 tracing::error!("读取响应流失败: {}", e);
+                                if let Some(metering) = ctx.metering() {
+                                    provider.record_credits_used(credential_id, metering);
+                                }
                                 // 发生错误，完成处理并返回所有事件
                                 let all_events = ctx.finish_and_get_all_events();
                                 let bytes: Vec<Result<Bytes, Infallible>> = all_events
                                     .into_iter()
                                     .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                     .collect();
-                                return Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval)));
+                                return Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, provider, credential_id)));
                             }
                             None => {
+                                if let Some(metering) = ctx.metering() {
+                                    provider.record_credits_used(credential_id, metering);
+                                }
                                 // 流结束，完成处理并返回所有事件（已更正 input_tokens）
                                 let all_events = ctx.finish_and_get_all_events();
                                 let bytes: Vec<Result<Bytes, Infallible>> = all_events
                                     .into_iter()
                                     .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                     .collect();
-                                return Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval)));
+                                return Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, provider, credential_id)));
                             }
                         }
                     }

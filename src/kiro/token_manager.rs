@@ -414,6 +414,8 @@ struct CredentialEntry {
     success_count: u64,
     /// 最后一次 API 调用时间（RFC3339 格式）
     last_used_at: Option<String>,
+    /// 网关记录的累计 credits 消耗（来自 meteringEvent）
+    total_credits_used: f64,
 }
 
 /// 禁用原因
@@ -438,6 +440,8 @@ enum DisabledReason {
 struct StatsEntry {
     success_count: u64,
     last_used_at: Option<String>,
+    #[serde(default)]
+    total_credits_used: f64,
 }
 
 // ============================================================================
@@ -474,6 +478,8 @@ pub struct CredentialEntrySnapshot {
     pub success_count: u64,
     /// 最后一次 API 调用时间（RFC3339 格式）
     pub last_used_at: Option<String>,
+    /// 网关记录的累计 credits 消耗
+    pub total_credits_used: f64,
     /// 是否配置了凭据级代理
     pub has_proxy: bool,
     /// 代理 URL（用于前端展示）
@@ -599,6 +605,7 @@ impl MultiTokenManager {
                     },
                     success_count: 0,
                     last_used_at: None,
+                    total_credits_used: 0.0,
                 }
             })
             .collect();
@@ -1058,6 +1065,7 @@ impl MultiTokenManager {
             if let Some(s) = stats.get(&entry.id.to_string()) {
                 entry.success_count = s.success_count;
                 entry.last_used_at = s.last_used_at.clone();
+                entry.total_credits_used = s.total_credits_used;
             }
         }
         *self.last_stats_save_at.lock() = Some(Instant::now());
@@ -1082,6 +1090,7 @@ impl MultiTokenManager {
                         StatsEntry {
                             success_count: e.success_count,
                             last_used_at: e.last_used_at.clone(),
+                            total_credits_used: e.total_credits_used,
                         },
                     )
                 })
@@ -1136,6 +1145,27 @@ impl MultiTokenManager {
                     "凭据 #{} API 调用成功（累计 {} 次）",
                     id,
                     entry.success_count
+                );
+            }
+        }
+        self.save_stats_debounced();
+    }
+
+    /// 记录上游 meteringEvent 返回的 credits 消耗
+    pub fn report_credits_used(&self, id: u64, credits: f64) {
+        if credits <= 0.0 {
+            return;
+        }
+
+        {
+            let mut entries = self.entries.lock();
+            if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                entry.total_credits_used += credits;
+                tracing::info!(
+                    credential_id = id,
+                    credits = credits,
+                    total_credits_used = entry.total_credits_used,
+                    "记录 credits 消耗"
                 );
             }
         }
@@ -1442,6 +1472,7 @@ impl MultiTokenManager {
                     email: e.credentials.email.clone(),
                     success_count: e.success_count,
                     last_used_at: e.last_used_at.clone(),
+                    total_credits_used: e.total_credits_used,
                     has_proxy: e.credentials.proxy_url.is_some(),
                     proxy_url: e.credentials.proxy_url.clone(),
                     refresh_failure_count: e.refresh_failure_count,
@@ -1757,6 +1788,7 @@ impl MultiTokenManager {
                 disabled_reason: None,
                 success_count: 0,
                 last_used_at: None,
+                total_credits_used: 0.0,
             });
         }
 

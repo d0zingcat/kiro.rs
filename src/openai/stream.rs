@@ -53,6 +53,11 @@ pub struct OpenAIStreamContext {
 }
 
 impl OpenAIStreamContext {
+    /// 当前累积的 metering 事件（若有）
+    pub fn metering(&self) -> Option<&MeteringEvent> {
+        self.metering.as_ref()
+    }
+
     /// 创建不启用 thinking 解析的流上下文
     #[allow(dead_code)] // 保留作为测试/公共 API 的便捷构造函数
     pub fn new(

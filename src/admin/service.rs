@@ -82,6 +82,7 @@ impl AdminService {
                 email: entry.email,
                 success_count: entry.success_count,
                 last_used_at: entry.last_used_at.clone(),
+                total_credits_used: entry.total_credits_used,
                 has_proxy: entry.has_proxy,
                 proxy_url: entry.proxy_url,
                 refresh_failure_count: entry.refresh_failure_count,

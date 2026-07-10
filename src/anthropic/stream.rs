@@ -458,6 +458,7 @@ impl SseStateManager {
         &mut self,
         input_tokens: i32,
         output_tokens: i32,
+        metering: Option<&crate::kiro::model::events::MeteringEvent>,
     ) -> Vec<SseEvent> {
         let mut events = Vec::new();
 
@@ -486,10 +487,7 @@ impl SseStateManager {
                         "stop_reason": self.get_stop_reason(),
                         "stop_sequence": null
                     },
-                    "usage": {
-                        "input_tokens": input_tokens,
-                        "output_tokens": output_tokens
-                    }
+                    "usage": build_usage_value(input_tokens, output_tokens, metering),
                 }),
             ));
         }
@@ -508,6 +506,8 @@ impl SseStateManager {
 }
 
 use super::converter::get_context_window_size;
+use super::usage::build_usage_value;
+use crate::kiro::model::events::MeteringEvent;
 
 /// 流处理上下文
 pub struct StreamContext {
@@ -523,6 +523,8 @@ pub struct StreamContext {
     pub context_input_tokens: Option<i32>,
     /// 输出 tokens 累计
     pub output_tokens: i32,
+    /// 上游 meteringEvent 返回的 credits 消耗
+    pub metering: Option<MeteringEvent>,
     /// 工具块索引映射 (tool_id -> block_index)
     pub tool_block_indices: HashMap<String, i32>,
     /// 工具名称反向映射（短名称 → 原始名称），用于响应时还原
@@ -559,6 +561,7 @@ impl StreamContext {
             input_tokens,
             context_input_tokens: None,
             output_tokens: 0,
+            metering: None,
             tool_block_indices: HashMap::new(),
             tool_name_map,
             thinking_enabled,
@@ -569,6 +572,11 @@ impl StreamContext {
             text_block_index: None,
             strip_thinking_leading_newline: false,
         }
+    }
+
+    /// 获取上游返回的 metering 信息
+    pub fn metering(&self) -> Option<&MeteringEvent> {
+        self.metering.as_ref()
     }
 
     /// 生成 message_start 事件
@@ -652,6 +660,15 @@ impl StreamContext {
                     context_usage.context_usage_percentage,
                     actual_input_tokens
                 );
+                Vec::new()
+            }
+            Event::Metering(metering) => {
+                tracing::debug!(
+                    credits = metering.usage,
+                    unit = ?metering.unit,
+                    "收到 meteringEvent"
+                );
+                self.metering = Some(metering.clone());
                 Vec::new()
             }
             Event::Error {
@@ -1120,10 +1137,25 @@ impl StreamContext {
         // 使用从 contextUsageEvent 计算的 input_tokens，如果没有则使用估算值
         let final_input_tokens = self.context_input_tokens.unwrap_or(self.input_tokens);
 
+        // 防御性诊断：流式空 completion。整个流未产生任何有效输出（output_tokens=0）
+        // 且 stop_reason 仍为 end_turn（排除 context 用满 / max_tokens 等合法空输出），
+        // 说明上游静默产出空结果（疑似 sonnet-5 thinking 被丢弃）。
+        if self.output_tokens == 0 && self.state_manager.get_stop_reason() == "end_turn" {
+            tracing::warn!(
+                model = %self.model,
+                input_tokens = %final_input_tokens,
+                thinking_enabled = self.thinking_enabled,
+                "流式空 completion：output_tokens=0 且 stop_reason=end_turn（疑似上游 thinking 被静默丢弃）"
+            );
+        }
+
         // 生成最终事件
         events.extend(
-            self.state_manager
-                .generate_final_events(final_input_tokens, self.output_tokens),
+            self.state_manager.generate_final_events(
+                final_input_tokens,
+                self.output_tokens,
+                self.metering.as_ref(),
+            ),
         );
         events
     }
@@ -1220,6 +1252,11 @@ impl BufferedStreamContext {
         }
 
         std::mem::take(&mut self.event_buffer)
+    }
+
+    /// 获取上游返回的 metering 信息
+    pub fn metering(&self) -> Option<&MeteringEvent> {
+        self.inner.metering()
     }
 }
 
