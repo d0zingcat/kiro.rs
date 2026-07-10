@@ -4,8 +4,9 @@
 //!
 //! # 支持的端点
 //!
-//! - `GET /openai/v1/models` - 获取可用模型列表
-//! - `POST /openai/v1/chat/completions` - Chat Completions（对话）
+//! - `POST /v1/chat/completions` - Chat Completions（对话）
+//!
+//! 模型列表由 Anthropic 兼容端点 `GET /v1/models` 提供，不在此模块重复注册。
 
 mod converter;
 mod handlers;

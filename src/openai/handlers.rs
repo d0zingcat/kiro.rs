@@ -20,9 +20,7 @@ use tokio::time::interval;
 use super::converter::{ConversionError, convert_request};
 use super::middleware::AppState;
 use super::stream::{OpenAIStreamContext, build_non_stream_response};
-use super::types::{
-    ChatCompletionRequest, ErrorResponse, Model, ModelsResponse,
-};
+use super::types::{ChatCompletionRequest, ErrorResponse};
 
 /// 将 KiroProvider 错误映射为 OpenAI 格式的 HTTP 响应
 fn map_provider_error(err: anyhow::Error) -> Response {
@@ -61,62 +59,7 @@ fn map_provider_error(err: anyhow::Error) -> Response {
         .into_response()
 }
 
-/// GET /openai/v1/models
-pub async fn get_models() -> impl IntoResponse {
-    tracing::info!("Received GET /openai/v1/models request");
-
-    let models = vec![
-        Model {
-            id: "claude-opus-4-6".into(),
-            object: "model".into(),
-            created: 1770163200,
-            owned_by: "anthropic".into(),
-        },
-        Model {
-            id: "claude-opus-4-6-thinking".into(),
-            object: "model".into(),
-            created: 1770163200,
-            owned_by: "anthropic".into(),
-        },
-        Model {
-            id: "claude-sonnet-4-6".into(),
-            object: "model".into(),
-            created: 1771286400,
-            owned_by: "anthropic".into(),
-        },
-        Model {
-            id: "claude-sonnet-4-6-thinking".into(),
-            object: "model".into(),
-            created: 1771286400,
-            owned_by: "anthropic".into(),
-        },
-        Model {
-            id: "claude-opus-4-5-20251101".into(),
-            object: "model".into(),
-            created: 1763942400,
-            owned_by: "anthropic".into(),
-        },
-        Model {
-            id: "claude-sonnet-4-5-20250929".into(),
-            object: "model".into(),
-            created: 1759104000,
-            owned_by: "anthropic".into(),
-        },
-        Model {
-            id: "claude-haiku-4-5-20251001".into(),
-            object: "model".into(),
-            created: 1760486400,
-            owned_by: "anthropic".into(),
-        },
-    ];
-
-    Json(ModelsResponse {
-        object: "list".into(),
-        data: models,
-    })
-}
-
-/// POST /openai/v1/chat/completions
+/// POST /v1/chat/completions
 pub async fn post_chat_completions(
     State(state): State<AppState>,
     JsonExtractor(payload): JsonExtractor<ChatCompletionRequest>,
@@ -125,7 +68,7 @@ pub async fn post_chat_completions(
         model = %payload.model,
         stream = %payload.stream,
         message_count = %payload.messages.len(),
-        "Received POST /openai/v1/chat/completions request"
+        "Received POST /v1/chat/completions request"
     );
 
     // 检查 KiroProvider 是否可用

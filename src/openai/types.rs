@@ -40,24 +40,6 @@ impl ErrorResponse {
     }
 }
 
-// === Models 端点类型 ===
-
-/// OpenAI 格式的模型信息
-#[derive(Debug, Serialize)]
-pub struct Model {
-    pub id: String,
-    pub object: String,
-    pub created: i64,
-    pub owned_by: String,
-}
-
-/// 模型列表响应
-#[derive(Debug, Serialize)]
-pub struct ModelsResponse {
-    pub object: String,
-    pub data: Vec<Model>,
-}
-
 // === Chat Completions 请求类型 ===
 
 /// Chat Completions 请求体
