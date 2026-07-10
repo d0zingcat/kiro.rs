@@ -5,6 +5,7 @@
 //! # 支持的端点
 //!
 //! - `POST /v1/chat/completions` - Chat Completions（对话）
+//! - `POST /v1/responses` - Responses（对话，OpenAI Responses API 兼容）
 //!
 //! 模型列表由 Anthropic 兼容端点 `GET /v1/models` 提供，不在此模块重复注册。
 

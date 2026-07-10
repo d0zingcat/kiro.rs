@@ -76,9 +76,6 @@ enum OpenItem {
 }
 
 /// Responses API 流式响应上下文
-///
-/// 尚未被 HTTP handler 调用（Responses 端点在 Task 8 中实现），暂时允许未使用。
-#[allow(dead_code)]
 pub struct ResponsesStreamContext {
     /// 响应 ID
     id: String,
@@ -112,7 +109,6 @@ pub struct ResponsesStreamContext {
     finished_items: Vec<Value>,
 }
 
-#[allow(dead_code)]
 impl ResponsesStreamContext {
     /// 创建不启用 thinking 解析的流上下文
     #[allow(dead_code)] // 保留作为测试/公共 API 的便捷构造函数
@@ -531,8 +527,6 @@ impl ResponsesStreamContext {
 /// 已经处理了 thinking 提取 / tool_name_map 还原 / metering→usage），
 /// 再将其消息内容映射为 Responses `output[]` 的 item 形状。
 ///
-/// 尚未被 HTTP handler 调用（Responses 端点在 Task 8 中实现），暂时允许未使用。
-#[allow(dead_code)]
 pub fn build_responses_non_stream(
     model: &str,
     input_tokens: i32,

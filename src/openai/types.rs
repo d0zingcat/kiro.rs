@@ -229,7 +229,6 @@ pub struct Usage {
 
 /// Responses API 请求体（最小实现，归一化后复用 Chat Completions 转换逻辑）
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct ResponsesRequest {
     pub model: String,
     pub input: ResponsesInput,
@@ -246,15 +245,13 @@ pub struct ResponsesRequest {
 /// Responses API `input` 字段：纯文本或结构化条目数组
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
-#[allow(dead_code)]
 pub enum ResponsesInput {
     Text(String),
     Items(Vec<serde_json::Value>),
 }
 
-/// Responses API 响应体骨架（供 Task 7 完善）
+/// Responses API 响应体
 #[derive(Debug, Serialize)]
-#[allow(dead_code)]
 pub struct ResponsesResponse {
     pub id: String,
     pub object: String,
@@ -268,7 +265,6 @@ pub struct ResponsesResponse {
 
 /// Responses API token 使用统计（字段命名与 Chat Completions 的 `Usage` 不同）
 #[derive(Debug, Serialize, Clone)]
-#[allow(dead_code)]
 pub struct ResponsesUsage {
     pub input_tokens: i32,
     pub output_tokens: i32,

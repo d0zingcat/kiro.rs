@@ -32,7 +32,7 @@
 ## 功能特性
 
 - **Anthropic API 兼容**: 完整支持 Anthropic Claude API 格式
-- **OpenAI API 兼容**: 支持 OpenAI Chat Completions API 格式 (`/v1/chat/completions`)
+- **OpenAI API 兼容**: 支持 OpenAI Chat Completions API 格式 (`/v1/chat/completions`) 和 Responses API 格式 (`/v1/responses`)
 - **流式响应**: 支持 SSE (Server-Sent Events) 流式输出
 - **Token 自动刷新**: 自动管理和刷新 OAuth Token
 - **多凭据支持**: 支持配置多个凭据，按优先级自动故障转移
@@ -398,6 +398,7 @@ RUST_LOG=debug ./target/release/kiro-rs
 | 端点 | 方法 | 描述 |
 |------|------|------|
 | `/v1/chat/completions` | POST | Chat Completions（支持流式和非流式） |
+| `/v1/responses` | POST | Responses（支持流式和非流式） |
 
 模型列表与 Anthropic 兼容端点共用 `GET /v1/models`，不单独提供 OpenAI 格式的 models 路由。
 
@@ -420,6 +421,29 @@ curl http://localhost:8080/v1/chat/completions \
   -d '{
     "model": "claude-sonnet-4-6",
     "messages": [{"role": "user", "content": "Hello!"}],
+    "stream": true
+  }'
+```
+
+同时支持 OpenAI Responses API 格式（`input` 可为纯文本或结构化条目数组）：
+
+```bash
+# 非流式请求
+curl http://localhost:8080/v1/responses \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4-6",
+    "input": "Hello!"
+  }'
+
+# 流式请求
+curl http://localhost:8080/v1/responses \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4-6",
+    "input": "Hello!",
     "stream": true
   }'
 ```

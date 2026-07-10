@@ -128,9 +128,6 @@ pub fn convert_request(req: &ChatCompletionRequest) -> Result<ConversionResult, 
 }
 
 /// 将 OpenAI Responses 请求归一化为 Chat Completions 请求，再复用 `convert_request`
-///
-/// 目前尚未被 HTTP handler 调用（Responses 端点在 Task 7/8 中实现），暂时允许未使用。
-#[allow(dead_code)]
 pub fn convert_responses_request(
     req: &ResponsesRequest,
 ) -> Result<ConversionResult, ConversionError> {
@@ -149,7 +146,6 @@ pub fn convert_responses_request(
 ///   - `function_call` 条目 → assistant 消息 + tool_calls
 ///   - `function_call_output` 条目 → tool 消息，`tool_call_id` 取自 `call_id`
 ///   - 未知类型条目：记录 warn 日志并跳过
-#[allow(dead_code)]
 pub fn normalize_responses_to_chat(
     req: &ResponsesRequest,
 ) -> Result<ChatCompletionRequest, ConversionError> {

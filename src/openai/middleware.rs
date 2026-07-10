@@ -23,7 +23,6 @@ pub struct AppState {
     /// Kiro Provider（可选，用于实际 API 调用）
     pub kiro_provider: Option<Arc<KiroProvider>>,
     /// 是否开启非流式响应的 thinking 块提取
-    #[allow(dead_code)] // 与 Anthropic AppState 对齐，后续 Responses 等路径会用到
     pub extract_thinking: bool,
 }
 
