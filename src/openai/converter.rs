@@ -71,7 +71,8 @@ pub fn convert_request(req: &ChatCompletionRequest) -> Result<ConversionResult, 
     let mut tools = convert_tools(&req.tools, &mut tool_name_map);
 
     // 9. 构建历史消息
-    let mut history = build_history(&system_messages, messages, &model_id, &mut tool_name_map)?;
+    let mut history =
+        build_history(&system_messages, messages, &model_id, &req.model, &mut tool_name_map)?;
 
     // 10. 验证并过滤 tool_use/tool_result 配对
     let (validated_tool_results, orphaned_tool_use_ids) =
@@ -205,14 +206,38 @@ fn convert_tools(
         .collect()
 }
 
+/// 生成 thinking 标签前缀（当模型名包含 `-thinking` 时）
+///
+/// 与 Anthropic 侧不同：OpenAI Chat Completions 协议没有显式的 `thinking` 请求字段，
+/// 因此改用模型名后缀 `-thinking`（大小写不敏感）作为开关。
+fn generate_thinking_prefix_for_model(model: &str) -> Option<String> {
+    if super::thinking::is_thinking_model(model) {
+        Some(
+            "<thinking_mode>enabled</thinking_mode><max_thinking_length>20000</max_thinking_length>"
+                .to_string(),
+        )
+    } else {
+        None
+    }
+}
+
+/// 检查内容是否已包含 thinking 标签配置
+fn has_thinking_tags(content: &str) -> bool {
+    content.contains("<thinking_mode>") || content.contains("<max_thinking_length>")
+}
+
 /// 构建历史消息
 fn build_history(
     system_messages: &[&ChatMessage],
     messages: &[&ChatMessage],
     model_id: &str,
+    raw_model: &str,
     tool_name_map: &mut HashMap<String, String>,
 ) -> Result<Vec<Message>, ConversionError> {
     let mut history = Vec::new();
+
+    // 生成 thinking 前缀（如果模型名包含 -thinking）
+    let thinking_prefix = generate_thinking_prefix_for_model(raw_model);
 
     // 1. 处理系统消息
     if !system_messages.is_empty() {
@@ -225,12 +250,30 @@ fn build_history(
         if !system_content.is_empty() {
             let system_content = format!("{}\n{}", system_content, shared::SYSTEM_CHUNKED_POLICY);
 
-            let user_msg = HistoryUserMessage::new(system_content, model_id);
+            // 注入 thinking 标签到系统消息最前面（如果需要且不存在）
+            let final_content = if let Some(ref prefix) = thinking_prefix {
+                if !has_thinking_tags(&system_content) {
+                    format!("{}\n{}", prefix, system_content)
+                } else {
+                    system_content
+                }
+            } else {
+                system_content
+            };
+
+            let user_msg = HistoryUserMessage::new(final_content, model_id);
             history.push(Message::User(user_msg));
 
             let assistant_msg = HistoryAssistantMessage::new("I will follow these instructions.");
             history.push(Message::Assistant(assistant_msg));
         }
+    } else if let Some(ref prefix) = thinking_prefix {
+        // 没有系统消息但需要注入 thinking 配置，插入新的系统消息
+        let user_msg = HistoryUserMessage::new(prefix.clone(), model_id);
+        history.push(Message::User(user_msg));
+
+        let assistant_msg = HistoryAssistantMessage::new("I will follow these instructions.");
+        history.push(Message::Assistant(assistant_msg));
     }
 
     // 2. 处理对话历史（最后一条作为 currentMessage，不加入历史）
@@ -680,6 +723,103 @@ mod tests {
             result.conversation_state.current_message.user_input_message.content,
             "How are you?"
         );
+    }
+
+    #[test]
+    fn test_thinking_model_injects_prefix_into_system_message() {
+        let mut req = make_request(vec![
+            ChatMessage {
+                role: "system".into(),
+                content: Some(serde_json::json!("You are helpful.")),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+            ChatMessage {
+                role: "user".into(),
+                content: Some(serde_json::json!("Hi")),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+        ]);
+        req.model = "claude-sonnet-4-6-thinking".into();
+
+        let result = convert_request(&req).unwrap();
+        let history = &result.conversation_state.history;
+        let first_user = history
+            .iter()
+            .find_map(|m| match m {
+                crate::kiro::model::requests::conversation::Message::User(u) => {
+                    Some(u.user_input_message.content.clone())
+                }
+                _ => None,
+            })
+            .expect("history should contain a user message");
+
+        assert!(first_user.contains("<thinking_mode>enabled</thinking_mode>"));
+        assert!(first_user.contains("<max_thinking_length>20000</max_thinking_length>"));
+        assert!(first_user.contains("You are helpful."));
+    }
+
+    #[test]
+    fn test_thinking_model_without_system_message_inserts_prefix_pair() {
+        let mut req = make_request(vec![ChatMessage {
+            role: "user".into(),
+            content: Some(serde_json::json!("Hi")),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }]);
+        req.model = "claude-opus-4-6-Thinking".into();
+
+        let result = convert_request(&req).unwrap();
+        let history = &result.conversation_state.history;
+        let first_user = history
+            .iter()
+            .find_map(|m| match m {
+                crate::kiro::model::requests::conversation::Message::User(u) => {
+                    Some(u.user_input_message.content.clone())
+                }
+                _ => None,
+            })
+            .expect("history should contain a user message");
+
+        assert!(first_user.contains("<thinking_mode>enabled</thinking_mode>"));
+    }
+
+    #[test]
+    fn test_non_thinking_model_does_not_inject_prefix() {
+        let req = make_request(vec![
+            ChatMessage {
+                role: "system".into(),
+                content: Some(serde_json::json!("You are helpful.")),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+            ChatMessage {
+                role: "user".into(),
+                content: Some(serde_json::json!("Hi")),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+        ]);
+
+        let result = convert_request(&req).unwrap();
+        let history = &result.conversation_state.history;
+        let first_user = history
+            .iter()
+            .find_map(|m| match m {
+                crate::kiro::model::requests::conversation::Message::User(u) => {
+                    Some(u.user_input_message.content.clone())
+                }
+                _ => None,
+            })
+            .expect("history should contain a user message");
+
+        assert!(!first_user.contains("<thinking_mode>"));
     }
 
     #[test]

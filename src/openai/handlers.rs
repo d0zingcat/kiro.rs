@@ -20,6 +20,7 @@ use tokio::time::interval;
 use super::converter::{ConversionError, convert_request};
 use super::middleware::AppState;
 use super::stream::{OpenAIStreamContext, build_non_stream_response};
+use super::thinking::is_thinking_model;
 use super::types::{ChatCompletionRequest, ErrorResponse};
 
 /// 将 KiroProvider 错误映射为 OpenAI 格式的 HTTP 响应
@@ -135,6 +136,9 @@ pub async fn post_chat_completions(
         .map(|o| o.include_usage)
         .unwrap_or(false);
 
+    // 模型名包含 `-thinking`（大小写不敏感）即视为启用 thinking
+    let thinking_enabled = is_thinking_model(&payload.model);
+
     if payload.stream {
         handle_stream_request(
             provider,
@@ -143,15 +147,19 @@ pub async fn post_chat_completions(
             input_tokens,
             tool_name_map,
             include_usage,
+            thinking_enabled,
         )
         .await
     } else {
+        // 非流式响应：仅在配置开启且模型启用 thinking 时提取 thinking 块
+        let extract_thinking = state.extract_thinking && thinking_enabled;
         handle_non_stream_request(
             provider,
             &request_body,
             &payload.model,
             input_tokens,
             tool_name_map,
+            extract_thinking,
         )
         .await
     }
@@ -177,13 +185,20 @@ async fn handle_stream_request(
     input_tokens: i32,
     tool_name_map: std::collections::HashMap<String, String>,
     include_usage: bool,
+    thinking_enabled: bool,
 ) -> Response {
     let response = match provider.call_api_stream(request_body).await {
         Ok(resp) => resp,
         Err(e) => return map_provider_error(e),
     };
 
-    let ctx = OpenAIStreamContext::new(model, input_tokens, tool_name_map, include_usage);
+    let ctx = OpenAIStreamContext::new_with_thinking(
+        model,
+        input_tokens,
+        tool_name_map,
+        include_usage,
+        thinking_enabled,
+    );
 
     // 创建 SSE 流
     let body_stream = response.bytes_stream();
@@ -275,6 +290,7 @@ async fn handle_non_stream_request(
     model: &str,
     input_tokens: i32,
     tool_name_map: std::collections::HashMap<String, String>,
+    extract_thinking: bool,
 ) -> Response {
     let response = match provider.call_api(request_body).await {
         Ok(resp) => resp,
@@ -315,6 +331,12 @@ async fn handle_non_stream_request(
         }
     }
 
-    let resp = build_non_stream_response(model, input_tokens, &events, &tool_name_map);
+    let resp = build_non_stream_response(
+        model,
+        input_tokens,
+        &events,
+        &tool_name_map,
+        extract_thinking,
+    );
     (StatusCode::OK, Json(resp)).into_response()
 }

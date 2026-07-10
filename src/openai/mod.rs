@@ -13,6 +13,7 @@ mod handlers;
 pub mod middleware;
 mod router;
 mod stream;
+mod thinking;
 pub mod types;
 mod usage;
 

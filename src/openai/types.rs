@@ -208,6 +208,9 @@ pub struct ResponseMessage {
     pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
+    /// 思考内容（thinking 模型），非标准字段，兼容主流 OpenAI 客户端约定
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 /// Token 使用统计
@@ -253,6 +256,9 @@ pub struct Delta {
     pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
+    /// 思考内容增量（thinking 模型）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 #[cfg(test)]
@@ -313,6 +319,7 @@ mod tests {
                     role: "assistant".into(),
                     content: Some("Hello!".into()),
                     tool_calls: None,
+                    reasoning_content: None,
                 },
                 finish_reason: Some("stop".into()),
             }],
@@ -343,6 +350,7 @@ mod tests {
                     role: None,
                     content: Some("Hello".into()),
                     tool_calls: None,
+                    reasoning_content: None,
                 },
                 finish_reason: None,
             }],

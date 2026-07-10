@@ -9,6 +9,7 @@ use uuid::Uuid;
 use crate::common::converter::get_context_window_size;
 use crate::kiro::model::events::{Event, MeteringEvent};
 
+use super::thinking::{ThinkingEvent, ThinkingStreamParser, extract_thinking_from_complete_text};
 use super::types::{
     ChatCompletionChunk, ChatCompletionResponse, Choice, ChunkChoice, Delta, FunctionCall,
     ResponseMessage, ToolCall,
@@ -45,14 +46,31 @@ pub struct OpenAIStreamContext {
     stop_reason: String,
     /// 计费事件（来自 meteringEvent）
     metering: Option<MeteringEvent>,
+    /// 是否启用 thinking（模型名包含 `-thinking`）
+    thinking_enabled: bool,
+    /// thinking 标签流式解析器
+    thinking_parser: ThinkingStreamParser,
 }
 
 impl OpenAIStreamContext {
+    /// 创建不启用 thinking 解析的流上下文
+    #[allow(dead_code)] // 保留作为测试/公共 API 的便捷构造函数
     pub fn new(
         model: &str,
         input_tokens: i32,
         tool_name_map: HashMap<String, String>,
         include_usage: bool,
+    ) -> Self {
+        Self::new_with_thinking(model, input_tokens, tool_name_map, include_usage, false)
+    }
+
+    /// 创建启用 thinking 解析的流上下文
+    pub fn new_with_thinking(
+        model: &str,
+        input_tokens: i32,
+        tool_name_map: HashMap<String, String>,
+        include_usage: bool,
+        thinking_enabled: bool,
     ) -> Self {
         Self {
             id: format!("chatcmpl-{}", Uuid::new_v4().simple()),
@@ -69,6 +87,8 @@ impl OpenAIStreamContext {
             include_usage,
             stop_reason: "stop".to_string(),
             metering: None,
+            thinking_enabled,
+            thinking_parser: ThinkingStreamParser::new(),
         }
     }
 
@@ -86,6 +106,7 @@ impl OpenAIStreamContext {
                             role: Some("assistant".into()),
                             content: None,
                             tool_calls: None,
+                            reasoning_content: None,
                         },
                         None,
                     );
@@ -95,15 +116,23 @@ impl OpenAIStreamContext {
                 // 发送内容 delta
                 if !resp.content.is_empty() {
                     self.output_tokens += estimate_tokens(&resp.content);
-                    let chunk = self.make_chunk(
-                        Delta {
-                            role: None,
-                            content: Some(resp.content.clone()),
-                            tool_calls: None,
-                        },
-                        None,
-                    );
-                    results.push(format_sse(&chunk));
+
+                    if self.thinking_enabled {
+                        for event in self.thinking_parser.push(&resp.content) {
+                            results.push(format_sse(&self.make_thinking_chunk(event)));
+                        }
+                    } else {
+                        let chunk = self.make_chunk(
+                            Delta {
+                                role: None,
+                                content: Some(resp.content.clone()),
+                                tool_calls: None,
+                                reasoning_content: None,
+                            },
+                            None,
+                        );
+                        results.push(format_sse(&chunk));
+                    }
                 }
 
                 results
@@ -120,10 +149,19 @@ impl OpenAIStreamContext {
                             role: Some("assistant".into()),
                             content: None,
                             tool_calls: None,
+                            reasoning_content: None,
                         },
                         None,
                     );
                     results.push(format_sse(&chunk));
+                }
+
+                // thinking 模式下，tool_use 到来前需要 flush 掉解析器中滞留的探测缓冲，
+                // 避免这部分文本被“吞掉”（与 Anthropic 侧 process_tool_use 的处理一致）
+                if self.thinking_enabled {
+                    for event in self.thinking_parser.finish() {
+                        results.push(format_sse(&self.make_thinking_chunk(event)));
+                    }
                 }
 
                 // 累积工具 JSON 并提取状态
@@ -173,6 +211,7 @@ impl OpenAIStreamContext {
                         role: None,
                         content: None,
                         tool_calls: Some(vec![tc]),
+                        reasoning_content: None,
                     },
                     None,
                 );
@@ -211,8 +250,15 @@ impl OpenAIStreamContext {
     }
 
     /// 生成最终事件
-    pub fn generate_final_events(&self) -> Vec<String> {
+    pub fn generate_final_events(&mut self) -> Vec<String> {
         let mut results = Vec::new();
+
+        // Flush thinking 解析器中滞留的剩余内容
+        if self.thinking_enabled {
+            for event in self.thinking_parser.finish() {
+                results.push(format_sse(&self.make_thinking_chunk(event)));
+            }
+        }
 
         let finish_reason = if self.has_tool_use && self.stop_reason == "stop" {
             "tool_calls".to_string()
@@ -232,6 +278,7 @@ impl OpenAIStreamContext {
                     role: None,
                     content: None,
                     tool_calls: None,
+                    reasoning_content: None,
                 },
                 finish_reason: Some(finish_reason),
             }],
@@ -268,14 +315,37 @@ impl OpenAIStreamContext {
             usage: None,
         }
     }
+
+    /// 将 thinking 解析事件转换为对应的 chunk（reasoning_content 或 content）
+    fn make_thinking_chunk(&self, event: ThinkingEvent) -> ChatCompletionChunk {
+        let delta = match event {
+            ThinkingEvent::Reasoning(text) => Delta {
+                role: None,
+                content: None,
+                tool_calls: None,
+                reasoning_content: Some(text),
+            },
+            ThinkingEvent::Content(text) => Delta {
+                role: None,
+                content: Some(text),
+                tool_calls: None,
+                reasoning_content: None,
+            },
+        };
+        self.make_chunk(delta, None)
+    }
 }
 
 /// 非流式响应：从收集的事件构建完整的 ChatCompletionResponse
+///
+/// `extract_thinking` 为 true 时，从完整文本中提取 `<thinking>` 块并填充 `reasoning_content`。
+/// 调用方应传入 `state.extract_thinking && thinking_enabled`（与 Anthropic 侧一致的开关）。
 pub fn build_non_stream_response(
     model: &str,
     input_tokens: i32,
     events: &[Event],
     tool_name_map: &HashMap<String, String>,
+    extract_thinking: bool,
 ) -> ChatCompletionResponse {
     let mut text_content = String::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
@@ -356,10 +426,17 @@ pub fn build_non_stream_response(
         stop_reason = "tool_calls".to_string();
     }
 
-    let content = if text_content.is_empty() {
+    // 提取 thinking 块（如果启用）
+    let (reasoning_content, remaining_text) = if extract_thinking {
+        extract_thinking_from_complete_text(&text_content)
+    } else {
+        (None, text_content.clone())
+    };
+
+    let content = if remaining_text.is_empty() {
         None
     } else {
-        Some(text_content.clone())
+        Some(remaining_text)
     };
 
     let tool_calls_field = if tool_calls.is_empty() {
@@ -387,6 +464,7 @@ pub fn build_non_stream_response(
                 role: "assistant".into(),
                 content,
                 tool_calls: tool_calls_field,
+                reasoning_content,
             },
             finish_reason: Some(stop_reason),
         }],
@@ -431,7 +509,7 @@ mod tests {
 
     #[test]
     fn test_stream_final_events() {
-        let ctx = OpenAIStreamContext::new("claude-sonnet-4-6", 100, HashMap::new(), false);
+        let mut ctx = OpenAIStreamContext::new("claude-sonnet-4-6", 100, HashMap::new(), false);
         let finals = ctx.generate_final_events();
         assert_eq!(finals.len(), 2);
         assert!(finals[0].contains("\"finish_reason\":\"stop\""));
@@ -458,7 +536,8 @@ mod tests {
     fn test_non_stream_response() {
         let events = vec![make_assistant_event("Hello world")];
 
-        let resp = build_non_stream_response("claude-sonnet-4-6", 50, &events, &HashMap::new());
+        let resp =
+            build_non_stream_response("claude-sonnet-4-6", 50, &events, &HashMap::new(), false);
         assert_eq!(resp.object, "chat.completion");
         assert_eq!(resp.choices[0].message.content.as_deref(), Some("Hello world"));
         assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));
@@ -476,7 +555,8 @@ mod tests {
             }),
         ];
 
-        let resp = build_non_stream_response("claude-sonnet-4-6", 50, &events, &HashMap::new());
+        let resp =
+            build_non_stream_response("claude-sonnet-4-6", 50, &events, &HashMap::new(), false);
         assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("tool_calls"));
         assert!(resp.choices[0].message.tool_calls.is_some());
         let tc = &resp.choices[0].message.tool_calls.as_ref().unwrap()[0];
@@ -527,8 +607,118 @@ mod tests {
                 usage: 0.03,
             }),
         ];
-        let resp = build_non_stream_response("claude-sonnet-4-6", 50, &events, &HashMap::new());
+        let resp =
+            build_non_stream_response("claude-sonnet-4-6", 50, &events, &HashMap::new(), false);
         assert_eq!(resp.usage.credits, Some(0.03));
         assert_eq!(resp.usage.metering_unit.as_deref(), Some("credit"));
+    }
+
+    #[test]
+    fn test_stream_thinking_splits_reasoning_and_content() {
+        let mut ctx = OpenAIStreamContext::new_with_thinking(
+            "claude-sonnet-4-6-thinking",
+            100,
+            HashMap::new(),
+            false,
+            true,
+        );
+
+        let event = make_assistant_event("<thinking>\nabc</thinking>\n\nhello");
+        let results = ctx.process_event(&event);
+        let combined: String = results.join("");
+
+        assert!(combined.contains("\"reasoning_content\":\"abc\""));
+        assert!(combined.contains("\"content\":\"hello\""));
+        // 非 thinking 字段不应出现在同一个 delta 中导致混淆内容类型
+        assert!(!combined.contains("\"content\":\"abc\""));
+    }
+
+    #[test]
+    fn test_stream_thinking_disabled_keeps_raw_tags_in_content() {
+        let mut ctx =
+            OpenAIStreamContext::new("claude-sonnet-4-6", 100, HashMap::new(), false);
+
+        let event = make_assistant_event("<thinking>abc</thinking>\n\nhello");
+        let results = ctx.process_event(&event);
+        let combined: String = results.join("");
+
+        assert!(combined.contains("<thinking>abc</thinking>"));
+        assert!(!combined.contains("reasoning_content"));
+    }
+
+    #[test]
+    fn test_stream_thinking_flushes_on_final_events() {
+        let mut ctx = OpenAIStreamContext::new_with_thinking(
+            "claude-sonnet-4-6-thinking",
+            100,
+            HashMap::new(),
+            false,
+            true,
+        );
+
+        // 结束标签紧跟流结束，没有 `\n\n`
+        let mut all_sse = ctx.process_event(&make_assistant_event("<thinking>abc</thinking>"));
+        all_sse.extend(ctx.generate_final_events());
+
+        // 从所有 SSE chunk 中提取并拼接 reasoning_content 增量
+        let reasoning: String = all_sse
+            .iter()
+            .filter(|s| s.starts_with("data: {"))
+            .filter_map(|s| {
+                let json_str = s.trim_start_matches("data: ").trim_end();
+                serde_json::from_str::<serde_json::Value>(json_str).ok()
+            })
+            .filter_map(|v| {
+                v["choices"][0]["delta"]["reasoning_content"]
+                    .as_str()
+                    .map(|s| s.to_string())
+            })
+            .collect();
+
+        assert_eq!(reasoning, "abc");
+        let combined: String = all_sse.join("");
+        assert!(!combined.contains("</thinking>"));
+    }
+
+    #[test]
+    fn test_non_stream_thinking_extracts_reasoning_content() {
+        let events = vec![make_assistant_event(
+            "<thinking>\nabc</thinking>\n\nhello",
+        )];
+
+        let resp =
+            build_non_stream_response("claude-sonnet-4-6-thinking", 50, &events, &HashMap::new(), true);
+
+        assert_eq!(
+            resp.choices[0].message.reasoning_content.as_deref(),
+            Some("abc")
+        );
+        assert_eq!(resp.choices[0].message.content.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn test_non_stream_thinking_gate_disabled_keeps_raw_text() {
+        let events = vec![make_assistant_event(
+            "<thinking>\nabc</thinking>\n\nhello",
+        )];
+
+        // extract_thinking = false（等价于 state.extract_thinking 关闭）：不应拆分
+        let resp = build_non_stream_response(
+            "claude-sonnet-4-6-thinking",
+            50,
+            &events,
+            &HashMap::new(),
+            false,
+        );
+
+        assert!(resp.choices[0].message.reasoning_content.is_none());
+        assert!(
+            resp.choices[0]
+                .message
+                .content
+                .as_deref()
+                .unwrap()
+                .contains("<thinking>")
+        );
     }
 }
