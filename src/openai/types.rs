@@ -225,6 +225,72 @@ pub struct Usage {
     pub metering_unit: Option<String>,
 }
 
+// === Responses API 类型 ===
+
+/// Responses API 请求体（最小实现，归一化后复用 Chat Completions 转换逻辑）
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct ResponsesRequest {
+    pub model: String,
+    pub input: ResponsesInput,
+    #[serde(default)]
+    pub instructions: Option<String>,
+    #[serde(default)]
+    pub stream: bool,
+    #[serde(default)]
+    pub tools: Option<Vec<ToolDefinition>>,
+    #[serde(default)]
+    pub user: Option<String>,
+}
+
+/// Responses API `input` 字段：纯文本或结构化条目数组
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+#[allow(dead_code)]
+pub enum ResponsesInput {
+    Text(String),
+    Items(Vec<serde_json::Value>),
+}
+
+/// Responses API 响应体骨架（供 Task 7 完善）
+#[derive(Debug, Serialize)]
+#[allow(dead_code)]
+pub struct ResponsesResponse {
+    pub id: String,
+    pub object: String,
+    pub created_at: i64,
+    pub model: String,
+    pub status: String,
+    pub output: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<ResponsesUsage>,
+}
+
+/// Responses API token 使用统计（字段命名与 Chat Completions 的 `Usage` 不同）
+#[derive(Debug, Serialize, Clone)]
+#[allow(dead_code)]
+pub struct ResponsesUsage {
+    pub input_tokens: i32,
+    pub output_tokens: i32,
+    pub total_tokens: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credits: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metering_unit: Option<String>,
+}
+
+impl From<Usage> for ResponsesUsage {
+    fn from(usage: Usage) -> Self {
+        Self {
+            input_tokens: usage.prompt_tokens,
+            output_tokens: usage.completion_tokens,
+            total_tokens: usage.total_tokens,
+            credits: usage.credits,
+            metering_unit: usage.metering_unit,
+        }
+    }
+}
+
 // === 流式响应类型 ===
 
 /// Chat Completion Chunk（流式）
@@ -444,6 +510,36 @@ mod tests {
         }"#;
         let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.effective_max_tokens(), 4096);
+    }
+
+    #[test]
+    fn test_deserialize_responses_request_text_input() {
+        let json = r#"{
+            "model": "claude-sonnet-4-6",
+            "input": "Hello!"
+        }"#;
+        let req: ResponsesRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.model, "claude-sonnet-4-6");
+        assert!(matches!(req.input, ResponsesInput::Text(ref s) if s == "Hello!"));
+        assert!(!req.stream);
+        assert!(req.instructions.is_none());
+    }
+
+    #[test]
+    fn test_deserialize_responses_request_items_input() {
+        let json = r#"{
+            "model": "claude-sonnet-4-6",
+            "instructions": "You are helpful.",
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Hi"}]}
+            ]
+        }"#;
+        let req: ResponsesRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.instructions.as_deref(), Some("You are helpful."));
+        match req.input {
+            ResponsesInput::Items(ref items) => assert_eq!(items.len(), 1),
+            _ => panic!("expected Items variant"),
+        }
     }
 
     #[test]

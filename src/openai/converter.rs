@@ -16,7 +16,9 @@ use crate::kiro::model::requests::tool::{
     InputSchema, Tool, ToolResult, ToolSpecification, ToolUseEntry,
 };
 
-use super::types::{ChatCompletionRequest, ChatMessage};
+use super::types::{
+    ChatCompletionRequest, ChatMessage, FunctionCall, ResponsesInput, ResponsesRequest, ToolCall,
+};
 
 /// 将 OpenAI Chat Completions 请求转换为 Kiro 请求
 pub fn convert_request(req: &ChatCompletionRequest) -> Result<ConversionResult, ConversionError> {
@@ -123,6 +125,179 @@ pub fn convert_request(req: &ChatCompletionRequest) -> Result<ConversionResult, 
         conversation_state,
         tool_name_map,
     })
+}
+
+/// 将 OpenAI Responses 请求归一化为 Chat Completions 请求，再复用 `convert_request`
+///
+/// 目前尚未被 HTTP handler 调用（Responses 端点在 Task 7/8 中实现），暂时允许未使用。
+#[allow(dead_code)]
+pub fn convert_responses_request(
+    req: &ResponsesRequest,
+) -> Result<ConversionResult, ConversionError> {
+    let chat = normalize_responses_to_chat(req)?;
+    convert_request(&chat)
+}
+
+/// 将 Responses API 请求归一化为 Chat Completions 消息列表
+///
+/// 归一化规则：
+/// - `instructions` → 前置一条 system 消息
+/// - `input` 为纯字符串 → 一条 user 消息
+/// - `input` 为条目数组：
+///   - `message` 条目：保留 role（user/assistant），从 content parts
+///     （`input_text`/`output_text`/`text`）中提取文本
+///   - `function_call` 条目 → assistant 消息 + tool_calls
+///   - `function_call_output` 条目 → tool 消息，`tool_call_id` 取自 `call_id`
+///   - 未知类型条目：记录 warn 日志并跳过
+#[allow(dead_code)]
+pub fn normalize_responses_to_chat(
+    req: &ResponsesRequest,
+) -> Result<ChatCompletionRequest, ConversionError> {
+    let mut messages = Vec::new();
+
+    if let Some(instructions) = req.instructions.as_ref().filter(|s| !s.is_empty()) {
+        messages.push(ChatMessage {
+            role: "system".into(),
+            content: Some(serde_json::json!(instructions)),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        });
+    }
+
+    match &req.input {
+        ResponsesInput::Text(text) => {
+            messages.push(ChatMessage {
+                role: "user".into(),
+                content: Some(serde_json::json!(text)),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            });
+        }
+        ResponsesInput::Items(items) => {
+            for item in items {
+                match convert_responses_item(item) {
+                    Some(msg) => messages.push(msg),
+                    None => tracing::warn!("跳过无法识别的 Responses input item: {}", item),
+                }
+            }
+        }
+    }
+
+    Ok(ChatCompletionRequest {
+        model: req.model.clone(),
+        messages,
+        stream: req.stream,
+        temperature: None,
+        top_p: None,
+        max_tokens: None,
+        max_completion_tokens: None,
+        stop: None,
+        tools: req.tools.clone(),
+        tool_choice: None,
+        stream_options: None,
+        user: req.user.clone(),
+    })
+}
+
+/// 转换单个 Responses `input` 条目为 Chat 消息
+///
+/// 返回 `None` 表示条目类型未知或缺少必需字段，调用方负责记录日志并跳过。
+fn convert_responses_item(item: &serde_json::Value) -> Option<ChatMessage> {
+    let item_type = item
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("message");
+
+    match item_type {
+        "message" => {
+            let role = item.get("role").and_then(|v| v.as_str())?.to_string();
+            let text = extract_responses_content_text(item.get("content"));
+            Some(ChatMessage {
+                role,
+                content: Some(serde_json::json!(text)),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            })
+        }
+        "function_call" => {
+            let call_id = item
+                .get("call_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let name = item
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let arguments = item
+                .get("arguments")
+                .and_then(|v| v.as_str())
+                .unwrap_or("{}")
+                .to_string();
+
+            Some(ChatMessage {
+                role: "assistant".into(),
+                content: None,
+                tool_calls: Some(vec![ToolCall {
+                    index: Some(0),
+                    id: Some(call_id),
+                    call_type: Some("function".into()),
+                    function: FunctionCall {
+                        name: Some(name),
+                        arguments,
+                    },
+                }]),
+                tool_call_id: None,
+                name: None,
+            })
+        }
+        "function_call_output" => {
+            let call_id = item
+                .get("call_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let output = match item.get("output") {
+                Some(serde_json::Value::String(s)) => s.clone(),
+                Some(v) => v.to_string(),
+                None => String::new(),
+            };
+            Some(ChatMessage {
+                role: "tool".into(),
+                content: Some(serde_json::json!(output)),
+                tool_calls: None,
+                tool_call_id: Some(call_id),
+                name: None,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// 从 Responses content parts 中提取文本（支持 input_text/output_text/text）
+fn extract_responses_content_text(content: Option<&serde_json::Value>) -> String {
+    match content {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|part| {
+                let part_type = part.get("type").and_then(|v| v.as_str())?;
+                if matches!(part_type, "input_text" | "output_text" | "text") {
+                    part.get("text")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
 }
 
 /// 分离 system/developer 消息和对话消息
@@ -516,7 +691,8 @@ fn merge_assistant_messages(
 mod tests {
     use super::*;
     use crate::openai::types::{
-        ChatMessage, FunctionCall, FunctionDefinition, ToolCall, ToolDefinition,
+        ChatMessage, FunctionCall, FunctionDefinition, ResponsesInput, ResponsesRequest, ToolCall,
+        ToolDefinition,
     };
 
     fn make_request(messages: Vec<ChatMessage>) -> ChatCompletionRequest {
@@ -840,5 +1016,163 @@ mod tests {
             .user_input_message
             .model_id;
         assert_eq!(model, "claude-sonnet-4.6");
+    }
+
+    // === Responses API 归一化测试 ===
+
+    fn make_responses_request(input: ResponsesInput) -> ResponsesRequest {
+        ResponsesRequest {
+            model: "claude-sonnet-4-6".into(),
+            input,
+            instructions: None,
+            stream: false,
+            tools: None,
+            user: None,
+        }
+    }
+
+    #[test]
+    fn test_normalize_text_input_with_instructions() {
+        let mut req = make_responses_request(ResponsesInput::Text("Hi there".into()));
+        req.instructions = Some("You are helpful.".into());
+
+        let chat = normalize_responses_to_chat(&req).unwrap();
+        assert_eq!(chat.messages.len(), 2);
+        assert_eq!(chat.messages[0].role, "system");
+        assert_eq!(chat.messages[0].text_content(), "You are helpful.");
+        assert_eq!(chat.messages[1].role, "user");
+        assert_eq!(chat.messages[1].text_content(), "Hi there");
+    }
+
+    #[test]
+    fn test_normalize_text_input_without_instructions() {
+        let req = make_responses_request(ResponsesInput::Text("Hello!".into()));
+
+        let chat = normalize_responses_to_chat(&req).unwrap();
+        assert_eq!(chat.messages.len(), 1);
+        assert_eq!(chat.messages[0].role, "user");
+        assert_eq!(chat.messages[0].text_content(), "Hello!");
+    }
+
+    #[test]
+    fn test_normalize_message_item_with_content_parts() {
+        let items = vec![serde_json::json!({
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "What's the weather?"}]
+        })];
+        let req = make_responses_request(ResponsesInput::Items(items));
+
+        let chat = normalize_responses_to_chat(&req).unwrap();
+        assert_eq!(chat.messages.len(), 1);
+        assert_eq!(chat.messages[0].role, "user");
+        assert_eq!(chat.messages[0].text_content(), "What's the weather?");
+    }
+
+    #[test]
+    fn test_normalize_function_call_item_becomes_assistant_tool_calls() {
+        let items = vec![serde_json::json!({
+            "type": "function_call",
+            "call_id": "call_abc",
+            "name": "get_weather",
+            "arguments": "{\"location\":\"Tokyo\"}"
+        })];
+        let req = make_responses_request(ResponsesInput::Items(items));
+
+        let chat = normalize_responses_to_chat(&req).unwrap();
+        assert_eq!(chat.messages.len(), 1);
+        assert_eq!(chat.messages[0].role, "assistant");
+        let tool_calls = chat.messages[0].tool_calls.as_ref().unwrap();
+        assert_eq!(tool_calls[0].id.as_deref(), Some("call_abc"));
+        assert_eq!(tool_calls[0].function.name.as_deref(), Some("get_weather"));
+        assert_eq!(tool_calls[0].function.arguments, "{\"location\":\"Tokyo\"}");
+    }
+
+    #[test]
+    fn test_normalize_function_call_output_item_becomes_tool_message() {
+        let items = vec![serde_json::json!({
+            "type": "function_call_output",
+            "call_id": "call_abc",
+            "output": "Sunny, 25°C"
+        })];
+        let req = make_responses_request(ResponsesInput::Items(items));
+
+        let chat = normalize_responses_to_chat(&req).unwrap();
+        assert_eq!(chat.messages.len(), 1);
+        assert_eq!(chat.messages[0].role, "tool");
+        assert_eq!(chat.messages[0].tool_call_id.as_deref(), Some("call_abc"));
+        assert_eq!(chat.messages[0].text_content(), "Sunny, 25°C");
+    }
+
+    #[test]
+    fn test_normalize_unknown_item_is_skipped() {
+        let items = vec![
+            serde_json::json!({"type": "reasoning", "id": "r1"}),
+            serde_json::json!({
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Hello"}]
+            }),
+        ];
+        let req = make_responses_request(ResponsesInput::Items(items));
+
+        let chat = normalize_responses_to_chat(&req).unwrap();
+        // 未知条目被跳过，只保留有效的 message 条目
+        assert_eq!(chat.messages.len(), 1);
+        assert_eq!(chat.messages[0].role, "user");
+    }
+
+    #[test]
+    fn test_normalize_full_conversation_with_tool_round_trip() {
+        let items = vec![
+            serde_json::json!({
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "What's the weather in Tokyo?"}]
+            }),
+            serde_json::json!({
+                "type": "function_call",
+                "call_id": "call_abc",
+                "name": "get_weather",
+                "arguments": "{\"location\":\"Tokyo\"}"
+            }),
+            serde_json::json!({
+                "type": "function_call_output",
+                "call_id": "call_abc",
+                "output": "Sunny, 25°C"
+            }),
+        ];
+        let mut req = make_responses_request(ResponsesInput::Items(items));
+        req.tools = Some(vec![ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionDefinition {
+                name: "get_weather".into(),
+                description: Some("Get weather".into()),
+                parameters: Some(serde_json::json!({
+                    "type": "object",
+                    "properties": {"location": {"type": "string"}}
+                })),
+            },
+        }]);
+
+        let result = convert_responses_request(&req).unwrap();
+        let ctx = &result
+            .conversation_state
+            .current_message
+            .user_input_message
+            .user_input_message_context;
+        assert!(!ctx.tool_results.is_empty());
+    }
+
+    #[test]
+    fn test_convert_responses_request_maps_model_tools_user_stream() {
+        let mut req = make_responses_request(ResponsesInput::Text("Hi".into()));
+        req.user = Some("session-123".into());
+        req.stream = true;
+
+        let chat = normalize_responses_to_chat(&req).unwrap();
+        assert_eq!(chat.model, "claude-sonnet-4-6");
+        assert_eq!(chat.user.as_deref(), Some("session-123"));
+        assert!(chat.stream);
     }
 }
