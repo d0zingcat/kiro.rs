@@ -479,7 +479,9 @@ fn format_sse(chunk: &ChatCompletionChunk) -> String {
 }
 
 /// 简单的 token 估算（每 4 字符约 1 token）
-fn estimate_tokens(text: &str) -> i32 {
+///
+/// `pub(super)` 以便 `responses_stream` 模块复用，避免重复实现。
+pub(super) fn estimate_tokens(text: &str) -> i32 {
     (text.len() as f64 / 4.0).ceil() as i32
 }
 

@@ -11,6 +11,7 @@
 mod converter;
 mod handlers;
 pub mod middleware;
+mod responses_stream;
 mod router;
 mod stream;
 mod thinking;
