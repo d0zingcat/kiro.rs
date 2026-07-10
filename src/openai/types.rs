@@ -1,6 +1,6 @@
 //! OpenAI API 类型定义
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 // === 错误响应 ===
 
@@ -60,7 +60,7 @@ pub struct ChatCompletionRequest {
     pub max_completion_tokens: Option<i32>,
     #[serde(default)]
     pub stop: Option<StopSequence>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_tools_lenient")]
     pub tools: Option<Vec<ToolDefinition>>,
     #[serde(default)]
     pub tool_choice: Option<serde_json::Value>,
@@ -140,12 +140,87 @@ impl ChatMessage {
 
 // === 工具类型 ===
 
-/// 工具定义
-#[derive(Debug, Clone, Deserialize, Serialize)]
+/// 工具定义（内部统一为 Chat Completions 的 `function` 嵌套结构）
+///
+/// 反序列化同时接受：
+/// - Chat Completions：`{"type":"function","function":{"name":...}}`
+/// - Responses API：`{"type":"function","name":...,"description":...,"parameters":...}`
+#[derive(Debug, Clone, Serialize)]
 pub struct ToolDefinition {
     #[serde(rename = "type")]
     pub tool_type: String,
     pub function: FunctionDefinition,
+}
+
+impl<'de> Deserialize<'de> for ToolDefinition {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Self::try_from_value(&value).ok_or_else(|| {
+            serde::de::Error::custom(
+                "expected function tool with nested `function` or flat `name` fields",
+            )
+        })
+    }
+}
+
+impl ToolDefinition {
+    /// 从 JSON 值解析 function tool；非 function / 无法识别时返回 None
+    pub fn try_from_value(value: &serde_json::Value) -> Option<Self> {
+        let tool_type = value
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("function");
+        if tool_type != "function" {
+            return None;
+        }
+
+        if let Some(func) = value.get("function") {
+            let name = func.get("name")?.as_str()?.to_string();
+            return Some(Self {
+                tool_type: tool_type.to_string(),
+                function: FunctionDefinition {
+                    name,
+                    description: func
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    parameters: func.get("parameters").cloned(),
+                },
+            });
+        }
+
+        // Responses / Codex 扁平格式
+        let name = value.get("name")?.as_str()?.to_string();
+        Some(Self {
+            tool_type: tool_type.to_string(),
+            function: FunctionDefinition {
+                name,
+                description: value
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                parameters: value.get("parameters").cloned(),
+            },
+        })
+    }
+}
+
+/// 宽松解析 tools 列表：跳过非 function / 无法识别的条目（Codex 会附带 local_shell 等）
+fn deserialize_tools_lenient<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<ToolDefinition>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let opt: Option<Vec<serde_json::Value>> = Option::deserialize(deserializer)?;
+    let Some(values) = opt else {
+        return Ok(None);
+    };
+    let tools: Vec<ToolDefinition> = values
+        .iter()
+        .filter_map(ToolDefinition::try_from_value)
+        .collect();
+    Ok(Some(tools))
 }
 
 /// 函数定义
@@ -236,7 +311,7 @@ pub struct ResponsesRequest {
     pub instructions: Option<String>,
     #[serde(default)]
     pub stream: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_tools_lenient")]
     pub tools: Option<Vec<ToolDefinition>>,
     #[serde(default)]
     pub user: Option<String>,
@@ -519,6 +594,35 @@ mod tests {
         assert!(matches!(req.input, ResponsesInput::Text(ref s) if s == "Hello!"));
         assert!(!req.stream);
         assert!(req.instructions.is_none());
+    }
+
+    #[test]
+    fn test_deserialize_responses_flat_function_tools() {
+        let json = r#"{
+            "model": "claude-haiku-4-5-20251001",
+            "input": "hi",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "parameters": {"type":"object","properties":{"city":{"type":"string"}}}
+                },
+                {"type": "local_shell"},
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "nested_ok",
+                        "parameters": {"type":"object"}
+                    }
+                }
+            ]
+        }"#;
+        let req: ResponsesRequest = serde_json::from_str(json).unwrap();
+        let tools = req.tools.expect("tools");
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].function.name, "get_weather");
+        assert_eq!(tools[1].function.name, "nested_ok");
     }
 
     #[test]
