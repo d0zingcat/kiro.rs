@@ -220,6 +220,22 @@ impl ResponsesStreamContext {
                 self.metering = Some(m.clone());
                 Vec::new()
             }
+            Event::ReasoningContent(reasoning) => {
+                let mut results = self.ensure_created();
+                // 原生 reasoning 事件始终转发到 Responses reasoning item，
+                // 不依赖模型名 `-thinking` 后缀（Opus 4.8 等会默认推送）。
+                if let Some(delta) = reasoning.text_delta() {
+                    self.output_tokens += estimate_tokens(delta);
+                    results.extend(self.push_reasoning_delta(delta));
+                }
+                // signature 收尾：关闭当前 reasoning item，便于后续 message/tool 接上
+                if reasoning.has_signature() {
+                    if matches!(self.current_item, Some(OpenItem::Reasoning { .. })) {
+                        results.extend(self.close_current_item());
+                    }
+                }
+                results
+            }
             _ => Vec::new(),
         }
     }
@@ -539,12 +555,28 @@ pub fn build_responses_non_stream(
     tool_name_map: &HashMap<String, String>,
     extract_thinking: bool,
 ) -> ResponsesResponse {
+    // 原生 reasoningContentEvent 文本（与 <thinking> 标签提取互补）
+    let mut native_reasoning = String::new();
+    for event in events {
+        if let Event::ReasoningContent(r) = event {
+            if let Some(delta) = r.text_delta() {
+                native_reasoning.push_str(delta);
+            }
+        }
+    }
+
     let chat = build_non_stream_response(model, input_tokens, events, tool_name_map, extract_thinking);
     let message = &chat.choices[0].message;
 
     let mut output = Vec::new();
 
-    if let Some(reasoning) = message.reasoning_content.as_deref() {
+    let reasoning_text = if !native_reasoning.is_empty() {
+        Some(native_reasoning)
+    } else {
+        message.reasoning_content.clone()
+    };
+
+    if let Some(reasoning) = reasoning_text.as_deref().filter(|s| !s.is_empty()) {
         output.push(reasoning_item_json(
             &format!("rs_{}", Uuid::new_v4().simple()),
             reasoning,
@@ -883,6 +915,58 @@ mod tests {
                 .unwrap()
                 .contains("<thinking>")
         );
+    }
+
+    #[test]
+    fn test_native_reasoning_content_event_forwarded_without_thinking_suffix() {
+        use crate::kiro::model::events::ReasoningContentEvent;
+
+        // Opus 4.8 等即使模型名无 -thinking 也会推送原生 reasoningContentEvent
+        let mut ctx = ResponsesStreamContext::new("claude-opus-4-8", 100, HashMap::new());
+
+        let mut all = ctx.process_event(&Event::ReasoningContent(ReasoningContentEvent::text(
+            "I've",
+        )));
+        all.extend(ctx.process_event(&Event::ReasoningContent(
+            ReasoningContentEvent::text(" verified"),
+        )));
+        all.extend(ctx.process_event(&Event::ReasoningContent(
+            ReasoningContentEvent::signature("sig_abc"),
+        )));
+        all.extend(ctx.process_event(&make_assistant_event("STATUS=OK")));
+        all.extend(ctx.generate_final_events());
+
+        let parsed = parse_events(&all);
+        let types = types_of(&parsed);
+
+        assert!(types.contains(&"response.reasoning_text.delta".to_string()));
+        assert!(types.contains(&"response.output_text.delta".to_string()));
+
+        let completed = parsed.last().unwrap();
+        let output = completed["response"]["output"].as_array().unwrap();
+        assert_eq!(output.len(), 2);
+        assert_eq!(output[0]["type"], "reasoning");
+        assert_eq!(output[0]["content"][0]["text"], "I've verified");
+        assert_eq!(output[1]["type"], "message");
+        assert_eq!(output[1]["content"][0]["text"], "STATUS=OK");
+    }
+
+    #[test]
+    fn test_non_stream_native_reasoning_content_event() {
+        use crate::kiro::model::events::ReasoningContentEvent;
+
+        let events = vec![
+            Event::ReasoningContent(ReasoningContentEvent::text("plan")),
+            Event::ReasoningContent(ReasoningContentEvent::text(" A")),
+            make_assistant_event("done"),
+        ];
+        let resp =
+            build_responses_non_stream("claude-opus-4-8", 50, &events, &HashMap::new(), false);
+        assert_eq!(resp.output.len(), 2);
+        assert_eq!(resp.output[0]["type"], "reasoning");
+        assert_eq!(resp.output[0]["content"][0]["text"], "plan A");
+        assert_eq!(resp.output[1]["type"], "message");
+        assert_eq!(resp.output[1]["content"][0]["text"], "done");
     }
 
     #[test]

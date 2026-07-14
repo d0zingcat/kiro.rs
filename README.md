@@ -569,6 +569,8 @@ OpenAI 端点补充说明：
 
 Sonnet 5 的 thinking 行为与已知限制见 [docs/claude-sonnet-5.md](docs/claude-sonnet-5.md)。
 
+Codex CLI 对接本地 OpenAI 兼容端点（`/v1/responses`）的端到端流程与实测记录见 [docs/e2e-codex.md](docs/e2e-codex.md)。
+
 ## Admin（可选）
 
 当 `config.json` 配置了非空 `adminApiKey` 时，会启用：
