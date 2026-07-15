@@ -5,6 +5,7 @@ mod common;
 mod http_client;
 mod kiro;
 mod model;
+mod openai;
 mod probe;
 pub mod token;
 
@@ -161,12 +162,12 @@ async fn main() {
         std::process::exit(1);
     });
     let token_manager = Arc::new(token_manager);
-    let kiro_provider = KiroProvider::with_proxy(
+    let kiro_provider = Arc::new(KiroProvider::with_proxy(
         token_manager.clone(),
         proxy_config.clone(),
         endpoints,
         config.default_endpoint.clone(),
-    );
+    ));
 
     // 初始化 count_tokens 配置
     token::init_config(token::CountTokensConfig {
@@ -177,12 +178,17 @@ async fn main() {
         tls_backend: config.tls_backend,
     });
 
-    // 构建 Anthropic API 路由（profile_arn 由 provider 层根据实际凭据动态注入）
-    let anthropic_app = anthropic::create_router_with_provider(
-        &api_key,
-        Some(kiro_provider),
-        config.extract_thinking,
-    );
+    // 构建 Anthropic / OpenAI 各自的 AppState（共享同一个 Arc<KiroProvider>）
+    let anthropic_state = anthropic::middleware::AppState::new(&api_key, config.extract_thinking)
+        .with_kiro_provider(kiro_provider.clone());
+    let openai_state = openai::middleware::AppState::new(&api_key, config.extract_thinking)
+        .with_kiro_provider(kiro_provider);
+
+    // 构建 Anthropic API 路由
+    let anthropic_app = anthropic::create_router_with_state(anthropic_state);
+
+    // 构建 OpenAI 兼容 API 路由
+    let openai_app = openai::create_router(openai_state);
 
     // 构建 Admin API 路由（如果配置了非空的 admin_api_key）
     // 安全检查：空字符串被视为未配置，防止空 key 绕过认证
@@ -195,7 +201,7 @@ async fn main() {
     let app = if let Some(admin_key) = &config.admin_api_key {
         if admin_key.trim().is_empty() {
             tracing::warn!("admin_api_key 配置为空，Admin API 未启用");
-            anthropic_app
+            anthropic_app.merge(openai_app)
         } else {
             let admin_service =
                 admin::AdminService::new(token_manager.clone(), endpoint_names.clone());
@@ -208,21 +214,25 @@ async fn main() {
             tracing::info!("Admin API 已启用");
             tracing::info!("Admin UI 已启用: /admin");
             anthropic_app
+                .merge(openai_app)
                 .nest("/api/admin", admin_app)
                 .nest("/admin", admin_ui_app)
         }
     } else {
-        anthropic_app
+        anthropic_app.merge(openai_app)
     };
 
     // 启动服务器
     let addr = format!("{}:{}", config.host, config.port);
-    tracing::info!("启动 Anthropic API 端点: {}", addr);
+    tracing::info!("启动 API 服务: {}", addr);
     tracing::info!("API Key: {}***", &api_key[..(api_key.len() / 2)]);
-    tracing::info!("可用 API:");
+    tracing::info!("Anthropic 兼容 API:");
     tracing::info!("  GET  /v1/models");
     tracing::info!("  POST /v1/messages");
     tracing::info!("  POST /v1/messages/count_tokens");
+    tracing::info!("OpenAI 兼容 API:");
+    tracing::info!("  POST /v1/chat/completions");
+    tracing::info!("  POST /v1/responses");
     if admin_key_valid {
         tracing::info!("Admin API:");
         tracing::info!("  GET  /api/admin/credentials");

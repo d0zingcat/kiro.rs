@@ -135,6 +135,18 @@ pub async fn run_probe(opts: ProbeOptions) -> anyhow::Result<()> {
                             tool.name, tool.tool_use_id, tool.stop, payload
                         );
                     }
+                    Event::ReasoningContent(reasoning) => {
+                        if let Some(text) = reasoning.text_delta() {
+                            print!("{text}");
+                            std::io::Write::flush(&mut std::io::stdout()).ok();
+                        }
+                        if reasoning.has_signature() {
+                            println!(
+                                "\n\n[reasoningContentEvent] signature_len={}",
+                                reasoning.signature.as_deref().unwrap_or("").len()
+                            );
+                        }
+                    }
                     Event::Error {
                         error_code,
                         error_message,

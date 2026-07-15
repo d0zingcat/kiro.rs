@@ -1,6 +1,6 @@
 # kiro-rs
 
-一个用 Rust 编写的 Anthropic Claude API 兼容代理服务，将 Anthropic API 请求转换为 Kiro API 请求。
+一个用 Rust 编写的 Anthropic Claude API 兼容代理服务，将 Anthropic API 请求转换为 Kiro API 请求。同时支持 OpenAI Chat Completions API 格式。
 
 ---
 
@@ -32,6 +32,7 @@
 ## 功能特性
 
 - **Anthropic API 兼容**: 完整支持 Anthropic Claude API 格式
+- **OpenAI API 兼容**: 支持 OpenAI Chat Completions API 格式 (`/v1/chat/completions`) 和 Responses API 格式 (`/v1/responses`)
 - **流式响应**: 支持 SSE (Server-Sent Events) 流式输出
 - **Token 自动刷新**: 自动管理和刷新 OAuth Token
 - **多凭据支持**: 支持配置多个凭据，按优先级自动故障转移
@@ -394,6 +395,68 @@ RUST_LOG=debug ./target/release/kiro-rs
 > - `/cc/v1/messages`：缓冲模式，等待上游流完成后，用从 `contextUsageEvent` 计算的准确 `input_tokens` 更正 `message_start`，然后一次性返回所有事件
 > - 等待期间会每 25 秒发送 `ping` 事件保活
 
+### OpenAI 兼容端点 (/v1)
+
+| 端点 | 方法 | 描述 |
+|------|------|------|
+| `/v1/chat/completions` | POST | Chat Completions（支持流式和非流式） |
+| `/v1/responses` | POST | Responses（支持流式和非流式） |
+
+模型列表与 Anthropic 兼容端点共用 `GET /v1/models`，不单独提供 OpenAI 格式的 models 路由。
+
+支持 OpenAI Chat Completions API 格式，可直接对接使用 OpenAI SDK 的工具和框架。
+
+```bash
+# 非流式请求
+curl http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4-6",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+
+# 流式请求
+curl http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4-6",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "stream": true
+  }'
+```
+
+同时支持 OpenAI Responses API 格式（`input` 可为纯文本或结构化条目数组）：
+
+```bash
+# 非流式请求
+curl http://localhost:8080/v1/responses \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4-6",
+    "input": "Hello!"
+  }'
+
+# 流式请求
+curl http://localhost:8080/v1/responses \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4-6",
+    "input": "Hello!",
+    "stream": true
+  }'
+```
+
+OpenAI 端点补充说明：
+
+- **工具调用**：支持 OpenAI `tools` / `tool_calls`（function calling）；Responses 侧对应 `function_call` / `function_call_output` 条目
+- **Thinking**：模型名包含 `-thinking`（大小写不敏感，如 `claude-sonnet-4-6-thinking`）时启用。Chat Completions 将思考内容放到 `reasoning_content`；Responses 输出独立的 `reasoning` 条目
+- **Usage / credits**：响应 `usage` 含 `prompt_tokens` / `completion_tokens` / `total_tokens`；上游有 metering 时额外返回 `credits`（及可选 `metering_unit`）
+- **隔离**：OpenAI 管线独立实现，不依赖 Anthropic 转换/流式模块
+
 ### Thinking 模式
 
 支持 Claude 的 extended thinking 功能：
@@ -505,6 +568,8 @@ RUST_LOG=debug ./target/release/kiro-rs
 | `*haiku*` | `claude-haiku-4.5` |
 
 Sonnet 5 的 thinking 行为与已知限制见 [docs/claude-sonnet-5.md](docs/claude-sonnet-5.md)。
+
+Codex CLI 对接本地 OpenAI 兼容端点（`/v1/responses`）的端到端流程与实测记录见 [docs/e2e-codex.md](docs/e2e-codex.md)。
 
 ## Admin（可选）
 

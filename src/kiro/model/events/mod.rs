@@ -6,10 +6,12 @@ mod assistant;
 mod base;
 mod context_usage;
 mod metering;
+mod reasoning_content;
 mod tool_use;
 
 pub use assistant::AssistantResponseEvent;
 pub use base::Event;
 pub use context_usage::ContextUsageEvent;
 pub use metering::MeteringEvent;
+pub use reasoning_content::ReasoningContentEvent;
 pub use tool_use::ToolUseEvent;
