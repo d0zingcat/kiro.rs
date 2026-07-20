@@ -52,10 +52,36 @@ impl std::fmt::Display for ConversionError {
 
 impl std::error::Error for ConversionError {}
 
+/// 将 GPT 模型名映射到 Kiro 上游 wire ID（`gpt-5.6-{sol,terra,luna}`）
+fn map_gpt_model(model_lower: &str) -> Option<String> {
+    let model_lower = model_lower.strip_prefix("openai.").unwrap_or(model_lower);
+    let normalized = model_lower.replace("gpt-5-6", "gpt-5.6");
+
+    if !normalized.contains("gpt-5.6") {
+        return None;
+    }
+
+    if normalized.contains("sol") {
+        return Some("gpt-5.6-sol".to_string());
+    }
+    if normalized.contains("terra") {
+        return Some("gpt-5.6-terra".to_string());
+    }
+    if normalized.contains("luna") {
+        return Some("gpt-5.6-luna".to_string());
+    }
+
+    None
+}
+
 /// 模型映射：将 Anthropic/OpenAI 模型名映射到 Kiro 模型 ID
 /// 严格对照版本号
 pub fn map_model(model: &str) -> Option<String> {
     let model_lower = model.to_lowercase();
+
+    if let Some(mapped) = map_gpt_model(&model_lower) {
+        return Some(mapped);
+    }
 
     if model_lower.contains("sonnet") {
         if model_lower.contains("sonnet-5") {
@@ -95,6 +121,7 @@ pub fn map_model(model: &str) -> Option<String> {
 /// Sonnet 5 / Opus 4.7 / 4.8 同 1M
 pub fn get_context_window_size(model: &str) -> i32 {
     match map_model(model) {
+        Some(mapped) if mapped.starts_with("gpt-5.6-") => 272_000,
         Some(mapped)
             if mapped == "claude-sonnet-5"
                 || mapped == "claude-sonnet-4.6"

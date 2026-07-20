@@ -42,7 +42,7 @@
 - **Thinking 模式**: 支持 Claude 的 extended thinking 功能
 - **工具调用**: 完整支持 function calling / tool use
 - **WebSearch**: 内置 WebSearch 工具转换逻辑
-- **多模型支持**: 支持 Sonnet、Opus、Haiku 系列模型
+- **多模型支持**: 支持 Sonnet、Opus、Haiku 系列模型，以及 GPT-5.6 Sol/Terra/Luna
 - **Credits 计量**: 解析上游 `meteringEvent`，在 `usage` 中返回 `credits` 并按凭据累计消耗
 - **Admin 管理**: 可选的 Web 管理界面和 API，支持凭据管理、余额查询等
 - **多级 Region 配置**: 支持全局和凭据级别的 Auth Region / API Region 配置
@@ -556,8 +556,11 @@ OpenAI 端点补充说明：
 
 ## 模型映射
 
-| Anthropic 模型 | Kiro 模型 |
-|----------------|-----------|
+| 客户端模型 | Kiro 上游模型 |
+|-----------|--------------|
+| `*gpt-5.6*sol*` / `gpt-5-6-sol` / `openai.gpt-5.6-sol` | `gpt-5.6-sol` |
+| `*gpt-5.6*terra*` / `gpt-5-6-terra` / `openai.gpt-5.6-terra` | `gpt-5.6-terra` |
+| `*gpt-5.6*luna*` / `gpt-5-6-luna` / `openai.gpt-5.6-luna` | `gpt-5.6-luna` |
 | `*sonnet-5*` | `claude-sonnet-5` |
 | `*sonnet*`（含 4.6/4-6） | `claude-sonnet-4.6` |
 | `*sonnet*`（含 4.5/4-5） | `claude-sonnet-4.5` |
@@ -566,6 +569,8 @@ OpenAI 端点补充说明：
 | `*opus*`（含 4.6/4-6） | `claude-opus-4.6` |
 | `*opus*`（含 4.5/4-5） | `claude-opus-4.5` |
 | `*haiku*` | `claude-haiku-4.5` |
+
+GPT-5.6 系列（Sol / Terra / Luna）于 2026-07-13 在 Kiro 上线，状态为 Experimental，上下文窗口 272K，仅 `us-east-1` / `eu-central-1` 可用。上游使用 hidden chain-of-thought，**不提供** Claude 风格的 `-thinking` 后缀或 effort 级别。
 
 Sonnet 5 的 thinking 行为与已知限制见 [docs/claude-sonnet-5.md](docs/claude-sonnet-5.md)。
 

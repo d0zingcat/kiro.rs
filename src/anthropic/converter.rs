@@ -614,6 +614,33 @@ mod tests {
     #[test]
     fn test_map_model_unsupported() {
         assert!(map_model("gpt-4").is_none());
+        assert!(map_model("gpt-4o").is_none());
+    }
+
+    #[test]
+    fn test_map_model_gpt56() {
+        assert_eq!(
+            map_model("gpt-5.6-sol"),
+            Some("gpt-5.6-sol".to_string())
+        );
+        assert_eq!(
+            map_model("gpt-5.6-terra"),
+            Some("gpt-5.6-terra".to_string())
+        );
+        assert_eq!(
+            map_model("gpt-5.6-luna"),
+            Some("gpt-5.6-luna".to_string())
+        );
+        assert_eq!(
+            map_model("gpt-5-6-sol"),
+            Some("gpt-5.6-sol".to_string())
+        );
+        assert_eq!(
+            map_model("openai.gpt-5.6-terra"),
+            Some("gpt-5.6-terra".to_string())
+        );
+        assert_eq!(get_context_window_size("gpt-5.6-sol"), 272_000);
+        assert_eq!(get_context_window_size("gpt-5.6-luna"), 272_000);
     }
 
     #[test]
