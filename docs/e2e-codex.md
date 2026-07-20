@@ -2,9 +2,9 @@
 
 本文记录用 **Codex CLI（headless）** 对接本地 **kiro.rs OpenAI 兼容端点**（`POST /v1/responses`）做端到端验证的流程、配置与实测结果。目标：确认 Codex 能经代理完成工具调用、多轮对话、大上下文与真实写代码场景，且**不走本机 ChatGPT 订阅**。
 
-> 日期：2026-07-10 ~ 2026-07-14（`feat/openai-compatible-api` 分支）  
+> 日期：2026-07-10 ~ 2026-07-20（含 `feat/gpt-5-6-models`）  
 > Codex CLI：`0.144.1`  
-> 工作区产物默认落在：`/tmp/kiro-e2e/`
+> 工作区产物默认落在：`/tmp/kiro-e2e/`、`/tmp/kiro-gpt-e2e/`
 
 ---
 
@@ -15,9 +15,13 @@
 | 多轮 + 工具 + 大上下文（3 turn） | `claude-haiku-4-5-20251001` | ✅ 通过；Turn3 ~236k input tokens |
 | 从零生成可玩贪食蛇 | `claude-haiku-4-5-20251001` | ✅ `snake.html` + README；exit 0 |
 | Opus 迭代 Neon Snake | `claude-opus-4-8` | ✅ 单文件增强版；exit 0 |
+| Codex × GPT-5.6 Sol 多轮写游戏 | `gpt-5.6-sol` | ✅ `snake.html` + localStorage 最高分 |
+| Codex × GPT-5.6 Terra 多轮写游戏 | `gpt-5.6-terra` | ✅ `tictactoe.html` + 比分 |
 | 流量是否打到 ChatGPT | — | ❌ 否（隔离 `CODEX_HOME` + `base_url=127.0.0.1:8990`） |
 
 Codex 侧曾出现 `GET /v1/models` 解析告警（期望字段 `models`，本代理返回 OpenAI 式 `data`），**不影响** `responses` 主路径。详见文末「已知问题」。
+
+GPT-5.6（Sol/Terra/Luna）走 Codex **Responses Lite** 工具形态（`additional_tools` + freeform `exec`）。本代理**不是** ChatGPT 原生后端，采用「提升 tools + custom↔function 往返」适配；说明见 [§8.1](#81-codex-responses-lite--gpt-56-适配策略)。
 
 ---
 
@@ -254,11 +258,49 @@ open /tmp/kiro-e2e/snake-game/snake.html
 
 | 问题 | 现象 | 处理 |
 |------|------|------|
-| Codex tools 扁平格式 | `422`：`tools[0]: missing field function` | `src/openai/types.rs` 宽松反序列化；跳过非 `function` 工具 |
+| Codex tools 扁平格式 | `422`：`tools[0]: missing field function` | `src/openai/types.rs` 宽松反序列化；跳过 `local_shell` 等 |
+| Codex Responses Lite `additional_tools` | GPT-5.6 报「无 shell / 无法写文件」 | 吸收并提升到顶层 tools；见 [§8.1](#81-codex-responses-lite--gpt-56-适配策略) |
+| freeform `exec`（`type: custom`） | 模型调了工具但 Codex 不执行 | 上游按 JSON function 收；回传 `custom_tool_call` |
+| GPT hidden CoT reasoning SSE | `ReasoningRawContentDelta without active item` | GPT-5.6 **不转发**原生 reasoning 事件 |
 | 凭据 `endpoint: cli` | 启动失败：未知端点 | 改为 `ide`（或注册对应端点） |
 | 误用用户 `~/.codex` | 可能打到 ChatGPT | 强制 `CODEX_HOME` + 自定义 `model_providers.kiro` |
 | `/v1/models` 形状 | Codex stderr：`missing field models` | 启动刷模型列表失败，主会话仍可用；见下节 |
-| `reasoningContentEvent` | WARN 静默丢弃 | Opus 等会发原生 reasoning 事件；当前不转发，不影响工具/终稿；见下节 |
+
+### 8.1 Codex Responses Lite / GPT-5.6 适配策略
+
+Codex CLI ≥ 0.144 对 `gpt-5.6-*`（及部分新模型）使用 **Responses Lite** 线格式：
+
+- 顶层常为 `"tools": null`
+- 工具定义放在 `input[]` 里一条 `{"type":"additional_tools","role":"developer","tools":[...]}`
+- 主工具是 freeform **`exec`**（`type: custom`，grammar），模型写 JS 调 `tools.exec_command` / `tools.apply_patch` 等
+- 客户端期望模型输出 **`custom_tool_call`**（`input` 为原文），而不是 `function_call` JSON arguments
+
+kiro.rs 上游是 Kiro 的 JSON `tool_use`，**不能**像对接 ChatGPT 那样整段透传 Responses Lite。因此采用与社区代理（如 LiteLLM hoist、metapi absorb）同类的适配：
+
+```text
+Codex 请求                          kiro.rs                              Codex 客户端
+─────────                          ───────                              ──────────
+input: additional_tools            吸收 tools → 合并顶层 tools
+  ├─ custom exec  ───────────────► 转为 function{input:string} ──► Kiro tool_use
+  ├─ function wait / ...
+  └─ namespace …（展开嵌套 function）
+                                   Kiro tool_use(exec, {"input":"…"})
+                                     ───────────────────────────────► custom_tool_call
+                                                                      (unwrap 成 freeform input)
+```
+
+实现位置：
+
+| 步骤 | 代码 |
+|------|------|
+| 吸收 `additional_tools`；识别 custom | `src/openai/converter.rs`（`absorb_additional_tools_item` / `normalize_responses_to_chat`） |
+| custom / namespace 解析 | `src/openai/types.rs`（`ToolDefinition::from_custom_tool` / `collect_from_codex_entry`） |
+| 按名回传 `custom_tool_call` | `src/openai/responses_stream.rs`（`custom_tool_names`） |
+| GPT 不转发 reasoning SSE | `src/openai/thinking.rs`（`is_gpt_hidden_cot_model`）+ `responses_stream.rs` |
+
+**不是** Responses Lite 字节级透传；若将来对接真正的 OpenAI Codex 后端，应优先透传。对 Kiro 这类非 Lite 上游，当前 hoist + 往返是必要折中。
+
+多轮历史中的 `custom_tool_call` / `custom_tool_call_output` 会归一化为 Chat 侧 `tool_calls` / `tool` 消息再转 Kiro。
 
 ---
 
@@ -270,7 +312,7 @@ Codex 期望类似 `{ "models": [...] }`，kiro.rs 的 `GET /v1/models` 返回 A
 
 若要消除噪音，可后续为 Codex 增加兼容字段或独立 models 视图（未做）。
 
-### 9.2 `reasoningContentEvent`（已接入 Responses）
+### 9.2 `reasoningContentEvent`
 
 上游（例如 Opus 4.8）会推送：
 
@@ -279,13 +321,17 @@ event_type=reasoningContentEvent
 payload ≈ {"text":"..."} 或带 signature 的收尾块
 ```
 
-当前行为（coding / Codex 场景）：
+当前行为：
 
-- ✅ `POST /v1/responses` 流式与非流式：转发为 Responses `reasoning` item（`response.reasoning_text.delta` 等）
-- ✅ 不依赖模型名 `-thinking` 后缀（原生事件始终转发）
+- ✅ Claude 等：`POST /v1/responses` 流式与非流式转发为 Responses `reasoning` item（`response.reasoning_text.delta` 等）
+- ✅ 不依赖模型名 `-thinking` 后缀（原生事件对非 GPT 模型始终转发）
+- ✅ **GPT-5.6**：hidden CoT，**刻意不转发** reasoning SSE（避免 Codex `ReasoningRawContentDelta without active item`）
 - ⚪ Chat Completions：暂不专门转发（本场景以 Responses 为准）
 - ⚪ Anthropic `/v1/messages`：暂未映射为 `thinking` block（可后续补）
-- `signature`：用于关闭当前 reasoning item；尚未作为 OpenAI `encrypted_content` 原样回传
+
+### 9.3 `collaboration` namespace
+
+Codex `additional_tools` 常带 `type: namespace, name: collaboration`（子代理）。对接 Azure / 部分官方 Responses Lite 时该 namespace 会被拒绝。本代理会将其**展开为普通 function** 发给 Kiro；本地 Sol/Terra 单 agent 写文件场景已验证可用。若上游拒绝 namespace，可再考虑直接丢弃该条目。
 
 ---
 
@@ -294,8 +340,9 @@ payload ≈ {"text":"..."} 或带 signature 的收尾块
 - [ ] `cargo build --release`（或当前 feature 组合）后启动 `-c` + `--credentials`
 - [ ] `curl`：`/v1/models`、`/v1/chat/completions`、`/v1/responses`（流式一次）
 - [ ] `CODEX_HOME=... codex exec ...` 小任务（读文件 + 写文件）
-- [ ] 确认 kiro 日志模型名与配置一致，且无 `gpt-*`
+- [ ] 确认 kiro 日志出现 `additional_tools` 吸收 / `custom_tools={"exec"}`（GPT-5.6）
 - [ ] （可选）`codex exec resume` 第二轮
+- [ ] （可选）`-m gpt-5.6-sol` / `gpt-5.6-terra` 写单文件小游戏
 - [ ] （可选）换 `claude-opus-4-8` 再跑一轮写代码任务
 
 ---
@@ -305,8 +352,10 @@ payload ≈ {"text":"..."} 或带 signature 的收尾块
 | 路径 | 说明 |
 |------|------|
 | `src/openai/` | OpenAI 兼容层（与 Anthropic 解耦） |
-| `src/openai/types.rs` | Codex 扁平 tools 兼容 |
-| `src/openai/responses_stream.rs` | Responses SSE |
+| `src/openai/types.rs` | 扁平 tools / custom / namespace 兼容 |
+| `src/openai/converter.rs` | Responses 归一化；吸收 `additional_tools` |
+| `src/openai/responses_stream.rs` | Responses SSE；`custom_tool_call` 回传 |
+| `src/openai/thinking.rs` | GPT hidden CoT 判定 |
 | `src/kiro/model/events/base.rs` | 事件类型；未知类型 WARN 丢弃 |
 | `README.md` | 对外端点与 curl 示例 |
 | `docs/claude-sonnet-5.md` | Sonnet 5 / thinking 说明 |
