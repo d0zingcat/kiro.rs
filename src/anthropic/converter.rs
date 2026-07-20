@@ -161,6 +161,7 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
     Ok(ConversionResult {
         conversation_state,
         tool_name_map,
+        custom_tool_names: Default::default(),
     })
 }
 
@@ -298,6 +299,12 @@ fn convert_tools(tools: &Option<Vec<super::types::Tool>>, tool_name_map: &mut Ha
 
 /// 生成thinking标签前缀
 fn generate_thinking_prefix(req: &MessagesRequest) -> Option<String> {
+    // GPT-5.6 使用 hidden chain-of-thought，不注入 Claude 风格 thinking 前缀
+    let model_lower = req.model.to_lowercase();
+    if model_lower.contains("gpt-5.6") || model_lower.contains("gpt-5-6") {
+        return None;
+    }
+
     if let Some(t) = &req.thinking {
         if t.thinking_type == "enabled" {
             return Some(format!(

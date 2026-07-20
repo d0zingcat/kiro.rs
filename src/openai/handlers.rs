@@ -244,6 +244,7 @@ pub async fn post_responses(
     let input_tokens = estimate_responses_input_tokens(&payload);
 
     let tool_name_map = conversion_result.tool_name_map;
+    let custom_tool_names = conversion_result.custom_tool_names;
 
     // 模型名包含 `-thinking`（大小写不敏感）即视为启用 thinking
     let thinking_enabled = is_thinking_model(&payload.model);
@@ -256,6 +257,7 @@ pub async fn post_responses(
             input_tokens,
             tool_name_map,
             thinking_enabled,
+            custom_tool_names,
         )
         .await
     } else {
@@ -268,6 +270,7 @@ pub async fn post_responses(
             input_tokens,
             tool_name_map,
             extract_thinking,
+            custom_tool_names,
         )
         .await
     }
@@ -483,6 +486,7 @@ async fn handle_responses_stream_request(
     input_tokens: i32,
     tool_name_map: std::collections::HashMap<String, String>,
     thinking_enabled: bool,
+    custom_tool_names: std::collections::HashSet<String>,
 ) -> Response {
     let api_result = match provider.call_api_stream(request_body).await {
         Ok(resp) => resp,
@@ -496,6 +500,7 @@ async fn handle_responses_stream_request(
         input_tokens,
         tool_name_map,
         thinking_enabled,
+        custom_tool_names,
     );
 
     // 创建 SSE 流
@@ -597,6 +602,7 @@ async fn handle_responses_non_stream_request(
     input_tokens: i32,
     tool_name_map: std::collections::HashMap<String, String>,
     extract_thinking: bool,
+    custom_tool_names: std::collections::HashSet<String>,
 ) -> Response {
     let api_result = match provider.call_api(request_body).await {
         Ok(resp) => resp,
@@ -652,6 +658,7 @@ async fn handle_responses_non_stream_request(
         &events,
         &tool_name_map,
         extract_thinking,
+        &custom_tool_names,
     );
 
     // 空补全（无文本、无 function_call、无 reasoning）视为上游异常

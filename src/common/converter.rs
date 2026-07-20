@@ -2,7 +2,7 @@
 //!
 //! Anthropic 和 OpenAI 兼容层共享的转换逻辑
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use sha2::{Digest, Sha256};
 
@@ -32,6 +32,11 @@ pub struct ConversionResult {
     pub conversation_state: crate::kiro::model::requests::conversation::ConversationState,
     /// 工具名称映射（短名称 → 原始名称），仅当存在超长工具名时非空
     pub tool_name_map: HashMap<String, String>,
+    /// Responses 侧需按 `custom_tool_call`（而非 `function_call`）回传的工具名
+    ///
+    /// Codex 会把 `exec` 等 freeform 工具声明为 `type: custom`；上游 Kiro 仍按 JSON
+    /// function calling 接收，但下游 Responses 流必须还原为 custom tool 事件。
+    pub custom_tool_names: HashSet<String>,
 }
 
 /// 转换错误

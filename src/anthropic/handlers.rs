@@ -752,6 +752,10 @@ async fn handle_non_stream_request(
 /// - 其他模型：仅当客户端显式 enabled/adaptive 时启用。
 fn should_extract_thinking(model: &str, thinking: &Option<Thinking>) -> bool {
     let model_lower = model.to_lowercase();
+    // GPT-5.6: hidden CoT，响应侧不拆分 thinking 块
+    if model_lower.contains("gpt-5.6") || model_lower.contains("gpt-5-6") {
+        return false;
+    }
     if model_lower.contains("sonnet-5") {
         thinking
             .as_ref()
@@ -770,6 +774,15 @@ fn should_extract_thinking(model: &str, thinking: &Option<Thinking>) -> bool {
 fn override_thinking_from_model_name(payload: &mut MessagesRequest) {
     let model_lower = payload.model.to_lowercase();
     if !model_lower.contains("thinking") {
+        return;
+    }
+
+    // GPT-5.6 使用 hidden CoT，忽略误加的 -thinking 后缀，避免注入 Claude 式 thinking 前缀
+    if model_lower.contains("gpt-5.6") || model_lower.contains("gpt-5-6") {
+        tracing::info!(
+            model = %payload.model,
+            "GPT 模型忽略 thinking 后缀（hidden chain-of-thought）"
+        );
         return;
     }
 

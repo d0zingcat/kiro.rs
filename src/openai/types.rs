@@ -145,11 +145,16 @@ impl ChatMessage {
 /// 反序列化同时接受：
 /// - Chat Completions：`{"type":"function","function":{"name":...}}`
 /// - Responses API：`{"type":"function","name":...,"description":...,"parameters":...}`
+/// - Codex custom / namespace：展开为可发给 Kiro 的 function 工具；`is_custom` 标记
+///   供 Responses 输出端还原为 `custom_tool_call`
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolDefinition {
     #[serde(rename = "type")]
     pub tool_type: String,
     pub function: FunctionDefinition,
+    /// 来自 Responses/Codex `type: custom` 的 freeform 工具
+    #[serde(skip)]
+    pub is_custom: bool,
 }
 
 impl<'de> Deserialize<'de> for ToolDefinition {
@@ -186,6 +191,7 @@ impl ToolDefinition {
                         .map(str::to_string),
                     parameters: func.get("parameters").cloned(),
                 },
+                is_custom: false,
             });
         }
 
@@ -201,11 +207,70 @@ impl ToolDefinition {
                     .map(str::to_string),
                 parameters: value.get("parameters").cloned(),
             },
+            is_custom: false,
         })
+    }
+
+    /// 将 Codex `type: custom` freeform 工具转为 Kiro 可接受的 JSON function 形态
+    pub fn from_custom_tool(value: &serde_json::Value) -> Option<Self> {
+        if value.get("type").and_then(|v| v.as_str()) != Some("custom") {
+            return None;
+        }
+        let name = value.get("name")?.as_str()?.to_string();
+        let base_desc = value
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let description = format!(
+            "{base_desc}\n\nIMPORTANT: This is a FREEFORM/custom tool. \
+             Put the raw freeform input in the `input` string field \
+             (for `exec`: JavaScript source text). Do not wrap the freeform \
+             body in extra JSON beyond the tool-arguments object."
+        );
+        Some(Self {
+            tool_type: "function".into(),
+            function: FunctionDefinition {
+                name,
+                description: Some(description),
+                parameters: Some(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "input": {
+                            "type": "string",
+                            "description": "Raw freeform tool input (plain text / JavaScript for exec)"
+                        }
+                    },
+                    "required": ["input"]
+                })),
+            },
+            is_custom: true,
+        })
+    }
+
+    /// 解析 Codex 工具条目：function / custom / namespace（展开嵌套）
+    pub fn collect_from_codex_entry(value: &serde_json::Value) -> Vec<Self> {
+        let tool_type = value
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("function");
+        match tool_type {
+            "function" => Self::try_from_value(value).into_iter().collect(),
+            "custom" => Self::from_custom_tool(value).into_iter().collect(),
+            "namespace" => value
+                .get("tools")
+                .and_then(|t| t.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .flat_map(Self::collect_from_codex_entry)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        }
     }
 }
 
-/// 宽松解析 tools 列表：跳过非 function / 无法识别的条目（Codex 会附带 local_shell 等）
+/// 宽松解析 tools 列表：接受 function/custom/namespace，跳过 local_shell 等
 fn deserialize_tools_lenient<'de, D>(
     deserializer: D,
 ) -> Result<Option<Vec<ToolDefinition>>, D::Error>
@@ -218,7 +283,7 @@ where
     };
     let tools: Vec<ToolDefinition> = values
         .iter()
-        .filter_map(ToolDefinition::try_from_value)
+        .flat_map(ToolDefinition::collect_from_codex_entry)
         .collect();
     Ok(Some(tools))
 }
