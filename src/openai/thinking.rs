@@ -43,8 +43,21 @@ fn is_quote_char(buffer: &str, pos: usize) -> bool {
 }
 
 /// 判断给定模型名是否为 thinking 模型（模型名包含 `-thinking`，大小写不敏感）
+///
+/// GPT-5.6 使用 hidden chain-of-thought，上游不接受 Claude 风格的 thinking 前缀；
+/// 即使客户端误传 `gpt-5.6-*-thinking` 也不应开启标签注入/拆分。
 pub(crate) fn is_thinking_model(model: &str) -> bool {
+    if is_gpt_hidden_cot_model(model) {
+        return false;
+    }
     model.to_lowercase().contains("-thinking")
+}
+
+/// GPT-5.6：hidden CoT；Responses 侧也不应转发原生 reasoning SSE（Codex 会报
+/// `ReasoningRawContentDelta without active item`）。
+pub(crate) fn is_gpt_hidden_cot_model(model: &str) -> bool {
+    let model_lower = model.to_lowercase();
+    model_lower.contains("gpt-5.6") || model_lower.contains("gpt-5-6")
 }
 
 /// 查找真正的 thinking 结束标签（不被引用字符包裹，且后面有双换行符）
@@ -378,6 +391,10 @@ mod tests {
         assert!(is_thinking_model("claude-sonnet-4-6-thinking"));
         assert!(is_thinking_model("claude-opus-4-6-THINKING"));
         assert!(!is_thinking_model("claude-sonnet-4-6"));
+        // GPT-5.6: hidden CoT，即使带 -thinking 后缀也不开启
+        assert!(!is_thinking_model("gpt-5.6-sol-thinking"));
+        assert!(!is_thinking_model("gpt-5-6-luna-thinking"));
+        assert!(!is_thinking_model("gpt-5.6-terra"));
     }
 
     #[test]

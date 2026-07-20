@@ -161,6 +161,7 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
     Ok(ConversionResult {
         conversation_state,
         tool_name_map,
+        custom_tool_names: Default::default(),
     })
 }
 
@@ -298,6 +299,12 @@ fn convert_tools(tools: &Option<Vec<super::types::Tool>>, tool_name_map: &mut Ha
 
 /// 生成thinking标签前缀
 fn generate_thinking_prefix(req: &MessagesRequest) -> Option<String> {
+    // GPT-5.6 使用 hidden chain-of-thought，不注入 Claude 风格 thinking 前缀
+    let model_lower = req.model.to_lowercase();
+    if model_lower.contains("gpt-5.6") || model_lower.contains("gpt-5-6") {
+        return None;
+    }
+
     if let Some(t) = &req.thinking {
         if t.thinking_type == "enabled" {
             return Some(format!(
@@ -614,6 +621,33 @@ mod tests {
     #[test]
     fn test_map_model_unsupported() {
         assert!(map_model("gpt-4").is_none());
+        assert!(map_model("gpt-4o").is_none());
+    }
+
+    #[test]
+    fn test_map_model_gpt56() {
+        assert_eq!(
+            map_model("gpt-5.6-sol"),
+            Some("gpt-5.6-sol".to_string())
+        );
+        assert_eq!(
+            map_model("gpt-5.6-terra"),
+            Some("gpt-5.6-terra".to_string())
+        );
+        assert_eq!(
+            map_model("gpt-5.6-luna"),
+            Some("gpt-5.6-luna".to_string())
+        );
+        assert_eq!(
+            map_model("gpt-5-6-sol"),
+            Some("gpt-5.6-sol".to_string())
+        );
+        assert_eq!(
+            map_model("openai.gpt-5.6-terra"),
+            Some("gpt-5.6-terra".to_string())
+        );
+        assert_eq!(get_context_window_size("gpt-5.6-sol"), 272_000);
+        assert_eq!(get_context_window_size("gpt-5.6-luna"), 272_000);
     }
 
     #[test]

@@ -42,7 +42,7 @@
 - **Thinking 模式**: 支持 Claude 的 extended thinking 功能
 - **工具调用**: 完整支持 function calling / tool use
 - **WebSearch**: 内置 WebSearch 工具转换逻辑
-- **多模型支持**: 支持 Sonnet、Opus、Haiku 系列模型
+- **多模型支持**: 支持 Sonnet、Opus、Haiku 系列模型，以及 GPT-5.6 Sol/Terra/Luna
 - **Credits 计量**: 解析上游 `meteringEvent`，在 `usage` 中返回 `credits` 并按凭据累计消耗
 - **Admin 管理**: 可选的 Web 管理界面和 API，支持凭据管理、余额查询等
 - **多级 Region 配置**: 支持全局和凭据级别的 Auth Region / API Region 配置
@@ -453,7 +453,8 @@ curl http://localhost:8080/v1/responses \
 OpenAI 端点补充说明：
 
 - **工具调用**：支持 OpenAI `tools` / `tool_calls`（function calling）；Responses 侧对应 `function_call` / `function_call_output` 条目
-- **Thinking**：模型名包含 `-thinking`（大小写不敏感，如 `claude-sonnet-4-6-thinking`）时启用。Chat Completions 将思考内容放到 `reasoning_content`；Responses 输出独立的 `reasoning` 条目
+- **Codex / GPT-5.6**：Codex Responses Lite 会把工具放进 `input` 的 `additional_tools`（含 freeform `exec`）。本代理将其提升为可调用 tools，上游按 JSON function 调用，回传时还原为 `custom_tool_call`。细节与社区对照见 [docs/e2e-codex.md §8.1](docs/e2e-codex.md#81-codex-responses-lite--gpt-56-适配策略)
+- **Thinking**：模型名包含 `-thinking`（大小写不敏感，如 `claude-sonnet-4-6-thinking`）时启用。Chat Completions 将思考内容放到 `reasoning_content`；Responses 输出独立的 `reasoning` 条目。GPT-5.6 为 hidden CoT，不注入 `-thinking` 前缀，Responses 侧也不转发原生 reasoning SSE（避免 Codex 解析异常）
 - **Usage / credits**：响应 `usage` 含 `prompt_tokens` / `completion_tokens` / `total_tokens`；上游有 metering 时额外返回 `credits`（及可选 `metering_unit`）
 - **隔离**：OpenAI 管线独立实现，不依赖 Anthropic 转换/流式模块
 
@@ -556,8 +557,11 @@ OpenAI 端点补充说明：
 
 ## 模型映射
 
-| Anthropic 模型 | Kiro 模型 |
-|----------------|-----------|
+| 客户端模型 | Kiro 上游模型 |
+|-----------|--------------|
+| `*gpt-5.6*sol*` / `gpt-5-6-sol` / `openai.gpt-5.6-sol` | `gpt-5.6-sol` |
+| `*gpt-5.6*terra*` / `gpt-5-6-terra` / `openai.gpt-5.6-terra` | `gpt-5.6-terra` |
+| `*gpt-5.6*luna*` / `gpt-5-6-luna` / `openai.gpt-5.6-luna` | `gpt-5.6-luna` |
 | `*sonnet-5*` | `claude-sonnet-5` |
 | `*sonnet*`（含 4.6/4-6） | `claude-sonnet-4.6` |
 | `*sonnet*`（含 4.5/4-5） | `claude-sonnet-4.5` |
@@ -567,9 +571,11 @@ OpenAI 端点补充说明：
 | `*opus*`（含 4.5/4-5） | `claude-opus-4.5` |
 | `*haiku*` | `claude-haiku-4.5` |
 
-Sonnet 5 的 thinking 行为与已知限制见 [docs/claude-sonnet-5.md](docs/claude-sonnet-5.md)。
+GPT-5.6 系列（Sol / Terra / Luna）于 2026-07-13 在 Kiro 上线，状态为 Experimental，上下文窗口 272K，仅 `us-east-1` / `eu-central-1` 可用。上游使用 hidden chain-of-thought，**不提供** Claude 风格的 `-thinking` 后缀或 effort 级别。
 
-Codex CLI 对接本地 OpenAI 兼容端点（`/v1/responses`）的端到端流程与实测记录见 [docs/e2e-codex.md](docs/e2e-codex.md)。
+与 **Codex CLI**（`wire_api = "responses"`）联用时，GPT-5.6 走 Responses Lite 工具协议；kiro.rs 的适配策略（吸收 `additional_tools`、`exec` ↔ `custom_tool_call`）见 [docs/e2e-codex.md §8.1](docs/e2e-codex.md#81-codex-responses-lite--gpt-56-适配策略)。完整 E2E 流程与实测记录见 [docs/e2e-codex.md](docs/e2e-codex.md)。
+
+Sonnet 5 的 thinking 行为与已知限制见 [docs/claude-sonnet-5.md](docs/claude-sonnet-5.md)。
 
 ## Admin（可选）
 

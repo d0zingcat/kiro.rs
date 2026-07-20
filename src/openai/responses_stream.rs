@@ -40,7 +40,7 @@
 //! 该形状力求贴近 OpenAI Responses API 的真实结构，但为兼容层自定义精简版本
 //! （例如 reasoning 使用完整原文而非官方的加密 summary）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -49,7 +49,7 @@ use crate::common::converter::get_context_window_size;
 use crate::kiro::model::events::{Event, MeteringEvent};
 
 use super::stream::{build_non_stream_response, estimate_tokens};
-use super::thinking::{ThinkingEvent, ThinkingStreamParser};
+use super::thinking::{ThinkingEvent, ThinkingStreamParser, is_gpt_hidden_cot_model};
 use super::types::{ResponsesResponse, ResponsesUsage};
 use super::usage::build_usage;
 
@@ -71,6 +71,15 @@ enum OpenItem {
         index: i32,
         call_id: String,
         name: String,
+        arguments: String,
+    },
+    /// Codex freeform / OpenAI custom tool（如 `exec`）
+    CustomToolCall {
+        id: String,
+        index: i32,
+        call_id: String,
+        name: String,
+        /// 累积的上游 JSON arguments（关闭时再 unwrap 为 freeform input）
         arguments: String,
     },
 }
@@ -99,6 +108,8 @@ pub struct ResponsesStreamContext {
     thinking_parser: ThinkingStreamParser,
     /// 工具名称映射（短名称 → 原始名称）
     tool_name_map: HashMap<String, String>,
+    /// 需按 `custom_tool_call` 回传的工具名（Codex freeform）
+    custom_tool_names: HashSet<String>,
     /// 是否已发送 response.created
     created_sent: bool,
     /// 下一个 output_index
@@ -118,7 +129,7 @@ impl ResponsesStreamContext {
     /// 创建不启用 thinking 解析的流上下文
     #[allow(dead_code)] // 保留作为测试/公共 API 的便捷构造函数
     pub fn new(model: &str, input_tokens: i32, tool_name_map: HashMap<String, String>) -> Self {
-        Self::new_with_thinking(model, input_tokens, tool_name_map, false)
+        Self::new_with_thinking(model, input_tokens, tool_name_map, false, HashSet::new())
     }
 
     /// 创建启用 thinking 解析的流上下文
@@ -127,6 +138,7 @@ impl ResponsesStreamContext {
         input_tokens: i32,
         tool_name_map: HashMap<String, String>,
         thinking_enabled: bool,
+        custom_tool_names: HashSet<String>,
     ) -> Self {
         Self {
             id: format!("resp_{}", Uuid::new_v4().simple()),
@@ -140,6 +152,7 @@ impl ResponsesStreamContext {
             thinking_enabled,
             thinking_parser: ThinkingStreamParser::new(),
             tool_name_map,
+            custom_tool_names,
             created_sent: false,
             output_index: 0,
             current_item: None,
@@ -177,21 +190,43 @@ impl ResponsesStreamContext {
                     }
                 }
 
-                let same_call = matches!(
-                    &self.current_item,
-                    Some(OpenItem::FunctionCall { call_id, .. }) if call_id == &tool_use.tool_use_id
-                );
-                if !same_call {
-                    let original_name = self
-                        .tool_name_map
-                        .get(&tool_use.name)
-                        .cloned()
-                        .unwrap_or_else(|| tool_use.name.clone());
-                    results.extend(self.open_function_call_item(&tool_use.tool_use_id, &original_name));
-                }
+                let original_name = self
+                    .tool_name_map
+                    .get(&tool_use.name)
+                    .cloned()
+                    .unwrap_or_else(|| tool_use.name.clone());
+                let is_custom = self.custom_tool_names.contains(&original_name);
 
-                results.extend(self.push_function_call_delta(&tool_use.input));
-                self.output_tokens += estimate_tokens(&tool_use.input);
+                if is_custom {
+                    let same_call = matches!(
+                        &self.current_item,
+                        Some(OpenItem::CustomToolCall { call_id, .. })
+                            if call_id == &tool_use.tool_use_id
+                    );
+                    if !same_call {
+                        results.extend(
+                            self.open_custom_tool_call_item(&tool_use.tool_use_id, &original_name),
+                        );
+                    }
+                    // 先缓冲 JSON arguments；关闭时 unwrap 成 freeform input 再发给 Codex
+                    if let Some(OpenItem::CustomToolCall { arguments, .. }) = &mut self.current_item
+                    {
+                        arguments.push_str(&tool_use.input);
+                    }
+                    self.output_tokens += estimate_tokens(&tool_use.input);
+                } else {
+                    let same_call = matches!(
+                        &self.current_item,
+                        Some(OpenItem::FunctionCall { call_id, .. })
+                            if call_id == &tool_use.tool_use_id
+                    );
+                    if !same_call {
+                        results
+                            .extend(self.open_function_call_item(&tool_use.tool_use_id, &original_name));
+                    }
+                    results.extend(self.push_function_call_delta(&tool_use.input));
+                    self.output_tokens += estimate_tokens(&tool_use.input);
+                }
 
                 if tool_use.stop {
                     results.extend(self.close_current_item());
@@ -221,6 +256,11 @@ impl ResponsesStreamContext {
                 Vec::new()
             }
             Event::ReasoningContent(reasoning) => {
+                // GPT-5.6 hidden CoT：不向 Codex 转发 reasoning SSE，避免
+                // `ReasoningRawContentDelta without active item`
+                if is_gpt_hidden_cot_model(&self.model) {
+                    return Vec::new();
+                }
                 let mut results = self.ensure_created();
                 // 原生 reasoning 事件始终转发到 Responses reasoning item，
                 // 不依赖模型名 `-thinking` 后缀（Opus 4.8 等会默认推送）。
@@ -468,6 +508,33 @@ impl ResponsesStreamContext {
         }))]
     }
 
+    /// 打开一个 custom_tool_call item（Codex freeform tools）
+    fn open_custom_tool_call_item(&mut self, call_id: &str, name: &str) -> Vec<String> {
+        let mut events = self.close_current_item();
+        let id = format!("ctc_{}", Uuid::new_v4().simple());
+        let index = self.next_output_index();
+        events.push(sse(json!({
+            "type": "response.output_item.added",
+            "output_index": index,
+            "item": {
+                "id": id,
+                "type": "custom_tool_call",
+                "status": "in_progress",
+                "call_id": call_id,
+                "name": name,
+                "input": ""
+            }
+        })));
+        self.current_item = Some(OpenItem::CustomToolCall {
+            id,
+            index,
+            call_id: call_id.to_string(),
+            name: name.to_string(),
+            arguments: String::new(),
+        });
+        events
+    }
+
     /// 关闭当前打开的 item（若有），发送对应的 done 事件序列并归档到 finished_items
     fn close_current_item(&mut self) -> Vec<String> {
         let item = match self.current_item.take() {
@@ -537,6 +604,37 @@ impl ResponsesStreamContext {
                 })));
                 self.finished_items.push(item_json);
             }
+            OpenItem::CustomToolCall {
+                id,
+                index,
+                call_id,
+                name,
+                arguments,
+            } => {
+                let input = unwrap_custom_tool_input(&arguments);
+                // 一次推送完整 freeform input（上游按 JSON arguments 流式，难以边解析边 unwrap）
+                if !input.is_empty() {
+                    events.push(sse(json!({
+                        "type": "response.custom_tool_call_input.delta",
+                        "item_id": id,
+                        "output_index": index,
+                        "delta": input
+                    })));
+                }
+                events.push(sse(json!({
+                    "type": "response.custom_tool_call_input.done",
+                    "item_id": id,
+                    "output_index": index,
+                    "input": input
+                })));
+                let item_json = custom_tool_call_item_json(&id, &call_id, &name, &input);
+                events.push(sse(json!({
+                    "type": "response.output_item.done",
+                    "output_index": index,
+                    "item": item_json.clone()
+                })));
+                self.finished_items.push(item_json);
+            }
         }
         events
     }
@@ -554,13 +652,17 @@ pub fn build_responses_non_stream(
     events: &[Event],
     tool_name_map: &HashMap<String, String>,
     extract_thinking: bool,
+    custom_tool_names: &HashSet<String>,
 ) -> ResponsesResponse {
     // 原生 reasoningContentEvent 文本（与 <thinking> 标签提取互补）
+    // GPT-5.6 hidden CoT：不写入 output，避免 Codex 解析异常
     let mut native_reasoning = String::new();
-    for event in events {
-        if let Event::ReasoningContent(r) = event {
-            if let Some(delta) = r.text_delta() {
-                native_reasoning.push_str(delta);
+    if !is_gpt_hidden_cot_model(model) {
+        for event in events {
+            if let Event::ReasoningContent(r) = event {
+                if let Some(delta) = r.text_delta() {
+                    native_reasoning.push_str(delta);
+                }
             }
         }
     }
@@ -592,12 +694,24 @@ pub fn build_responses_non_stream(
 
     if let Some(tool_calls) = message.tool_calls.as_ref() {
         for tc in tool_calls {
-            output.push(function_call_item_json(
-                &format!("fc_{}", Uuid::new_v4().simple()),
-                tc.id.as_deref().unwrap_or_default(),
-                tc.function.name.as_deref().unwrap_or_default(),
-                &tc.function.arguments,
-            ));
+            let name = tc.function.name.as_deref().unwrap_or_default();
+            let call_id = tc.id.as_deref().unwrap_or_default();
+            if custom_tool_names.contains(name) {
+                let input = unwrap_custom_tool_input(&tc.function.arguments);
+                output.push(custom_tool_call_item_json(
+                    &format!("ctc_{}", Uuid::new_v4().simple()),
+                    call_id,
+                    name,
+                    &input,
+                ));
+            } else {
+                output.push(function_call_item_json(
+                    &format!("fc_{}", Uuid::new_v4().simple()),
+                    call_id,
+                    name,
+                    &tc.function.arguments,
+                ));
+            }
         }
     }
 
@@ -615,6 +729,28 @@ pub fn build_responses_non_stream(
         output,
         usage: Some(chat.usage.into()),
     }
+}
+
+/// 将 Kiro JSON function arguments 还原为 Codex freeform custom tool input
+fn unwrap_custom_tool_input(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
+        match v {
+            Value::String(s) => return s,
+            Value::Object(map) => {
+                for key in ["input", "code", "source", "script", "content"] {
+                    if let Some(Value::String(s)) = map.get(key) {
+                        return s.clone();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    raw.to_string()
 }
 
 /// reasoning output item 的 JSON 形状（流式 done 事件与非流式共用，已通过测试锁定）
@@ -647,6 +783,18 @@ fn function_call_item_json(id: &str, call_id: &str, name: &str, arguments: &str)
         "call_id": call_id,
         "name": name,
         "arguments": arguments
+    })
+}
+
+/// custom_tool_call output item 的 JSON 形状（Codex freeform）
+fn custom_tool_call_item_json(id: &str, call_id: &str, name: &str, input: &str) -> Value {
+    json!({
+        "id": id,
+        "type": "custom_tool_call",
+        "status": "completed",
+        "call_id": call_id,
+        "name": name,
+        "input": input
     })
 }
 
@@ -861,6 +1009,7 @@ mod tests {
             100,
             HashMap::new(),
             true,
+            HashSet::new(),
         );
 
         let mut all = ctx.process_event(&make_assistant_event("<thinking>\nabc</thinking>\n\nhello"));
@@ -961,7 +1110,7 @@ mod tests {
             make_assistant_event("done"),
         ];
         let resp =
-            build_responses_non_stream("claude-opus-4-8", 50, &events, &HashMap::new(), false);
+            build_responses_non_stream("claude-opus-4-8", 50, &events, &HashMap::new(), false, &HashSet::new());
         assert_eq!(resp.output.len(), 2);
         assert_eq!(resp.output[0]["type"], "reasoning");
         assert_eq!(resp.output[0]["content"][0]["text"], "plan A");
@@ -991,7 +1140,7 @@ mod tests {
     #[test]
     fn test_non_stream_plain_text() {
         let events = vec![make_assistant_event("Hello world")];
-        let resp = build_responses_non_stream("claude-sonnet-4-6", 50, &events, &HashMap::new(), false);
+        let resp = build_responses_non_stream("claude-sonnet-4-6", 50, &events, &HashMap::new(), false, &HashSet::new());
 
         assert_eq!(resp.object, "response");
         assert_eq!(resp.status, "completed");
@@ -1010,7 +1159,7 @@ mod tests {
             stop: true,
         })];
 
-        let resp = build_responses_non_stream("claude-sonnet-4-6", 50, &events, &HashMap::new(), false);
+        let resp = build_responses_non_stream("claude-sonnet-4-6", 50, &events, &HashMap::new(), false, &HashSet::new());
 
         assert_eq!(resp.output.len(), 1);
         assert_eq!(resp.output[0]["type"], "function_call");
@@ -1023,7 +1172,7 @@ mod tests {
     fn test_non_stream_reasoning_and_message() {
         let events = vec![make_assistant_event("<thinking>\nabc</thinking>\n\nhello")];
         let resp =
-            build_responses_non_stream("claude-sonnet-4-6-thinking", 50, &events, &HashMap::new(), true);
+            build_responses_non_stream("claude-sonnet-4-6-thinking", 50, &events, &HashMap::new(), true, &HashSet::new());
 
         assert_eq!(resp.output.len(), 2);
         assert_eq!(resp.output[0]["type"], "reasoning");
@@ -1045,7 +1194,7 @@ mod tests {
             stop: true,
         })];
 
-        let resp = build_responses_non_stream("claude-sonnet-4-6", 50, &events, &name_map, false);
+        let resp = build_responses_non_stream("claude-sonnet-4-6", 50, &events, &name_map, false, &HashSet::new());
         assert_eq!(resp.output[0]["name"], "original_long_name");
     }
 
@@ -1059,7 +1208,7 @@ mod tests {
                 usage: 0.03,
             }),
         ];
-        let resp = build_responses_non_stream("claude-sonnet-4-6", 50, &events, &HashMap::new(), false);
+        let resp = build_responses_non_stream("claude-sonnet-4-6", 50, &events, &HashMap::new(), false, &HashSet::new());
         let usage = resp.usage.as_ref().unwrap();
         assert_eq!(usage.credits, Some(0.03));
         assert_eq!(usage.metering_unit.as_deref(), Some("credit"));

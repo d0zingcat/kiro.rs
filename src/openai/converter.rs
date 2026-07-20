@@ -2,7 +2,7 @@
 //!
 //! 负责将 OpenAI Chat Completions API 请求格式转换为 Kiro API 请求格式
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use uuid::Uuid;
 
@@ -18,6 +18,7 @@ use crate::kiro::model::requests::tool::{
 
 use super::types::{
     ChatCompletionRequest, ChatMessage, FunctionCall, ResponsesInput, ResponsesRequest, ToolCall,
+    ToolDefinition,
 };
 
 /// 将 OpenAI Chat Completions 请求转换为 Kiro 请求
@@ -124,6 +125,7 @@ pub fn convert_request(req: &ChatCompletionRequest) -> Result<ConversionResult, 
     Ok(ConversionResult {
         conversation_state,
         tool_name_map,
+        custom_tool_names: Default::default(),
     })
 }
 
@@ -131,8 +133,10 @@ pub fn convert_request(req: &ChatCompletionRequest) -> Result<ConversionResult, 
 pub fn convert_responses_request(
     req: &ResponsesRequest,
 ) -> Result<ConversionResult, ConversionError> {
-    let chat = normalize_responses_to_chat(req)?;
-    convert_request(&chat)
+    let (chat, custom_tool_names) = normalize_responses_to_chat(req)?;
+    let mut result = convert_request(&chat)?;
+    result.custom_tool_names = custom_tool_names;
+    Ok(result)
 }
 
 /// 将 Responses API 请求归一化为 Chat Completions 消息列表
@@ -143,13 +147,18 @@ pub fn convert_responses_request(
 /// - `input` 为条目数组：
 ///   - `message` 条目：保留 role（user/assistant），从 content parts
 ///     （`input_text`/`output_text`/`text`）中提取文本
-///   - `function_call` 条目 → assistant 消息 + tool_calls
-///   - `function_call_output` 条目 → tool 消息，`tool_call_id` 取自 `call_id`
+///   - `function_call` / `custom_tool_call` 条目 → assistant 消息 + tool_calls
+///   - `function_call_output` / `custom_tool_call_output` 条目 → tool 消息
+///   - `additional_tools`（Codex）：吸收 tools 并入顶层 tools，不产生消息
 ///   - 未知类型条目：记录 warn 日志并跳过
+///
+/// 返回值第二项为需按 Responses `custom_tool_call` 回传的工具名集合。
 pub fn normalize_responses_to_chat(
     req: &ResponsesRequest,
-) -> Result<ChatCompletionRequest, ConversionError> {
+) -> Result<(ChatCompletionRequest, HashSet<String>), ConversionError> {
     let mut messages = Vec::new();
+    let mut extra_tools: Vec<ToolDefinition> = Vec::new();
+    let mut custom_tool_names = HashSet::new();
 
     if let Some(instructions) = req.instructions.as_ref().filter(|s| !s.is_empty()) {
         messages.push(ChatMessage {
@@ -173,28 +182,126 @@ pub fn normalize_responses_to_chat(
         }
         ResponsesInput::Items(items) => {
             for item in items {
+                if absorb_additional_tools_item(item, &mut extra_tools, &mut custom_tool_names) {
+                    continue;
+                }
                 match convert_responses_item(item) {
                     Some(msg) => messages.push(msg),
-                    None => tracing::warn!("跳过无法识别的 Responses input item: {}", item),
+                    None => {
+                        let item_type = item
+                            .get("type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("message");
+                        // reasoning 等历史条目可静默跳过；其余仍告警便于发现协议漂移
+                        if item_type != "reasoning" {
+                            tracing::warn!("跳过无法识别的 Responses input item: {}", item);
+                        }
+                    }
                 }
             }
         }
     }
 
-    Ok(ChatCompletionRequest {
-        model: req.model.clone(),
-        messages,
-        stream: req.stream,
-        temperature: None,
-        top_p: None,
-        max_tokens: None,
-        max_completion_tokens: None,
-        stop: None,
-        tools: req.tools.clone(),
-        tool_choice: None,
-        stream_options: None,
-        user: req.user.clone(),
-    })
+    // 顶层 tools 里也可能已有 custom（经 lenient 反序列化）
+    if let Some(tools) = &req.tools {
+        for t in tools {
+            if t.is_custom {
+                custom_tool_names.insert(t.function.name.clone());
+            }
+        }
+    }
+
+    let tools = merge_tool_definitions(req.tools.clone(), extra_tools);
+    for t in tools.iter().flatten() {
+        if t.is_custom {
+            custom_tool_names.insert(t.function.name.clone());
+        }
+    }
+
+    if !custom_tool_names.is_empty() {
+        tracing::info!(
+            custom_tools = ?custom_tool_names,
+            "Responses 请求含 Codex custom tools，将按 custom_tool_call 回传"
+        );
+    }
+
+    Ok((
+        ChatCompletionRequest {
+            model: req.model.clone(),
+            messages,
+            stream: req.stream,
+            temperature: None,
+            top_p: None,
+            max_tokens: None,
+            max_completion_tokens: None,
+            stop: None,
+            tools,
+            tool_choice: None,
+            stream_options: None,
+            user: req.user.clone(),
+        },
+        custom_tool_names,
+    ))
+}
+
+/// 吸收 Codex `type: additional_tools`（或 developer + tools）条目；成功则返回 true
+fn absorb_additional_tools_item(
+    item: &serde_json::Value,
+    extra_tools: &mut Vec<ToolDefinition>,
+    custom_tool_names: &mut HashSet<String>,
+) -> bool {
+    let item_type = item
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("message");
+    let is_additional = item_type == "additional_tools"
+        || (item_type != "message"
+            && item.get("tools").is_some()
+            && item.get("role").and_then(|r| r.as_str()) == Some("developer"));
+    if !is_additional {
+        return false;
+    }
+
+    let Some(tools_arr) = item.get("tools").and_then(|t| t.as_array()) else {
+        return true;
+    };
+
+    let mut absorbed = 0usize;
+    for entry in tools_arr {
+        for td in ToolDefinition::collect_from_codex_entry(entry) {
+            if td.is_custom {
+                custom_tool_names.insert(td.function.name.clone());
+            }
+            if !extra_tools
+                .iter()
+                .any(|e| e.function.name == td.function.name)
+            {
+                extra_tools.push(td);
+                absorbed += 1;
+            }
+        }
+    }
+    tracing::info!(
+        absorbed,
+        "已从 Responses additional_tools 吸收 Codex 工具定义"
+    );
+    true
+}
+
+fn merge_tool_definitions(
+    base: Option<Vec<ToolDefinition>>,
+    extra: Vec<ToolDefinition>,
+) -> Option<Vec<ToolDefinition>> {
+    if base.is_none() && extra.is_empty() {
+        return None;
+    }
+    let mut out = base.unwrap_or_default();
+    for td in extra {
+        if !out.iter().any(|e| e.function.name == td.function.name) {
+            out.push(td);
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 /// 转换单个 Responses `input` 条目为 Chat 消息
@@ -251,7 +358,41 @@ fn convert_responses_item(item: &serde_json::Value) -> Option<ChatMessage> {
                 name: None,
             })
         }
-        "function_call_output" => {
+        "custom_tool_call" => {
+            let call_id = item
+                .get("call_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let name = item
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let input = item
+                .get("input")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            // 历史回灌：把 freeform input 包成 Kiro JSON function arguments
+            let arguments = serde_json::json!({ "input": input }).to_string();
+
+            Some(ChatMessage {
+                role: "assistant".into(),
+                content: None,
+                tool_calls: Some(vec![ToolCall {
+                    index: Some(0),
+                    id: Some(call_id),
+                    call_type: Some("custom".into()),
+                    function: FunctionCall {
+                        name: Some(name),
+                        arguments,
+                    },
+                }]),
+                tool_call_id: None,
+                name: None,
+            })
+        }
+        "function_call_output" | "custom_tool_call_output" => {
             let call_id = item
                 .get("call_id")
                 .and_then(|v| v.as_str())
@@ -816,6 +957,7 @@ mod tests {
                     "properties": {"location": {"type": "string"}}
                 })),
             },
+            is_custom: false,
         }]);
 
         let result = convert_request(&req).unwrap();
@@ -1032,7 +1174,7 @@ mod tests {
         let mut req = make_responses_request(ResponsesInput::Text("Hi there".into()));
         req.instructions = Some("You are helpful.".into());
 
-        let chat = normalize_responses_to_chat(&req).unwrap();
+        let (chat, _) = normalize_responses_to_chat(&req).unwrap();
         assert_eq!(chat.messages.len(), 2);
         assert_eq!(chat.messages[0].role, "system");
         assert_eq!(chat.messages[0].text_content(), "You are helpful.");
@@ -1044,7 +1186,7 @@ mod tests {
     fn test_normalize_text_input_without_instructions() {
         let req = make_responses_request(ResponsesInput::Text("Hello!".into()));
 
-        let chat = normalize_responses_to_chat(&req).unwrap();
+        let (chat, _) = normalize_responses_to_chat(&req).unwrap();
         assert_eq!(chat.messages.len(), 1);
         assert_eq!(chat.messages[0].role, "user");
         assert_eq!(chat.messages[0].text_content(), "Hello!");
@@ -1059,7 +1201,7 @@ mod tests {
         })];
         let req = make_responses_request(ResponsesInput::Items(items));
 
-        let chat = normalize_responses_to_chat(&req).unwrap();
+        let (chat, _) = normalize_responses_to_chat(&req).unwrap();
         assert_eq!(chat.messages.len(), 1);
         assert_eq!(chat.messages[0].role, "user");
         assert_eq!(chat.messages[0].text_content(), "What's the weather?");
@@ -1075,7 +1217,7 @@ mod tests {
         })];
         let req = make_responses_request(ResponsesInput::Items(items));
 
-        let chat = normalize_responses_to_chat(&req).unwrap();
+        let (chat, _) = normalize_responses_to_chat(&req).unwrap();
         assert_eq!(chat.messages.len(), 1);
         assert_eq!(chat.messages[0].role, "assistant");
         let tool_calls = chat.messages[0].tool_calls.as_ref().unwrap();
@@ -1093,7 +1235,7 @@ mod tests {
         })];
         let req = make_responses_request(ResponsesInput::Items(items));
 
-        let chat = normalize_responses_to_chat(&req).unwrap();
+        let (chat, _) = normalize_responses_to_chat(&req).unwrap();
         assert_eq!(chat.messages.len(), 1);
         assert_eq!(chat.messages[0].role, "tool");
         assert_eq!(chat.messages[0].tool_call_id.as_deref(), Some("call_abc"));
@@ -1112,7 +1254,7 @@ mod tests {
         ];
         let req = make_responses_request(ResponsesInput::Items(items));
 
-        let chat = normalize_responses_to_chat(&req).unwrap();
+        let (chat, _) = normalize_responses_to_chat(&req).unwrap();
         // 未知条目被跳过，只保留有效的 message 条目
         assert_eq!(chat.messages.len(), 1);
         assert_eq!(chat.messages[0].role, "user");
@@ -1149,6 +1291,7 @@ mod tests {
                     "properties": {"location": {"type": "string"}}
                 })),
             },
+            is_custom: false,
         }]);
 
         let result = convert_responses_request(&req).unwrap();
@@ -1166,9 +1309,80 @@ mod tests {
         req.user = Some("session-123".into());
         req.stream = true;
 
-        let chat = normalize_responses_to_chat(&req).unwrap();
+        let (chat, _) = normalize_responses_to_chat(&req).unwrap();
         assert_eq!(chat.model, "claude-sonnet-4-6");
         assert_eq!(chat.user.as_deref(), Some("session-123"));
         assert!(chat.stream);
+    }
+
+    #[test]
+    fn test_normalize_absorbs_codex_additional_tools() {
+        let items = vec![
+            serde_json::json!({
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [
+                    {
+                        "type": "custom",
+                        "name": "exec",
+                        "description": "Run JS to call nested tools",
+                        "format": {"type": "grammar", "syntax": "lark", "definition": "start: SOURCE\nSOURCE: /[\\s\\S]+/"}
+                    },
+                    {
+                        "type": "function",
+                        "name": "wait",
+                        "description": "Wait on exec cell",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"cell_id": {"type": "string"}},
+                            "required": ["cell_id"]
+                        }
+                    },
+                    {
+                        "type": "namespace",
+                        "name": "collaboration",
+                        "tools": [{
+                            "type": "function",
+                            "name": "list_agents",
+                            "parameters": {"type": "object", "properties": {}}
+                        }]
+                    }
+                ]
+            }),
+            serde_json::json!({
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "write a file"}]
+            }),
+        ];
+        let req = make_responses_request(ResponsesInput::Items(items));
+        let (chat, custom) = normalize_responses_to_chat(&req).unwrap();
+
+        assert_eq!(chat.messages.len(), 1);
+        assert_eq!(chat.messages[0].role, "user");
+
+        let tools = chat.tools.expect("tools absorbed");
+        let names: Vec<_> = tools.iter().map(|t| t.function.name.as_str()).collect();
+        assert!(names.contains(&"exec"));
+        assert!(names.contains(&"wait"));
+        assert!(names.contains(&"list_agents"));
+        assert!(custom.contains("exec"));
+        assert!(tools.iter().any(|t| t.function.name == "exec" && t.is_custom));
+    }
+
+    #[test]
+    fn test_normalize_custom_tool_call_round_trip_item() {
+        let items = vec![serde_json::json!({
+            "type": "custom_tool_call",
+            "call_id": "call_exec_1",
+            "name": "exec",
+            "input": "await tools.exec_command({cmd: 'ls'});"
+        })];
+        let req = make_responses_request(ResponsesInput::Items(items));
+        let (chat, _) = normalize_responses_to_chat(&req).unwrap();
+        assert_eq!(chat.messages[0].role, "assistant");
+        let tc = &chat.messages[0].tool_calls.as_ref().unwrap()[0];
+        assert_eq!(tc.function.name.as_deref(), Some("exec"));
+        assert!(tc.function.arguments.contains("exec_command"));
     }
 }
