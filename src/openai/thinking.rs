@@ -73,6 +73,19 @@ pub(crate) fn is_gpt_hidden_cot_model(model: &str) -> bool {
     model_lower.contains("gpt-5.6") || model_lower.contains("gpt-5-6")
 }
 
+/// 判断是否需要主动注入 `<thinking_mode>` 前缀（仅用于请求侧构造）
+///
+/// 与 [`is_thinking_model`] 不同：这里只看客户端是否显式传入 `-thinking` 后缀，
+/// 不会因为 `map_model` 落在 `claude-sonnet-5` / `claude-opus-5` 而自动注入——
+/// 这两个家族上游本身默认 adaptive thinking，Anthropic 兼容层对裸别名也不会
+/// 主动下发 thinking 配置，OpenAI 侧保持一致，避免重复/冲突指令。
+pub(crate) fn wants_thinking_prefix(model: &str) -> bool {
+    if is_gpt_hidden_cot_model(model) {
+        return false;
+    }
+    model.to_lowercase().contains("-thinking")
+}
+
 /// 查找真正的 thinking 结束标签（不被引用字符包裹，且后面有双换行符）
 fn find_real_thinking_end_tag(buffer: &str) -> Option<usize> {
     const TAG: &str = "</thinking>";
@@ -432,6 +445,29 @@ mod tests {
     #[test]
     fn test_is_thinking_model_haiku_thinking_suffix_still_true() {
         assert!(is_thinking_model("haiku-thinking"));
+    }
+
+    #[test]
+    fn test_wants_thinking_prefix_bare_alias_is_false() {
+        // 裸别名 sonnet/opus 上游默认 adaptive thinking，Anthropic 侧不会主动
+        // 下发 thinking 配置，OpenAI 侧请求构造也不应注入 <thinking_mode> 前缀，
+        // 即使 is_thinking_model（响应拆分）对它们返回 true。
+        assert!(!wants_thinking_prefix("sonnet"));
+        assert!(!wants_thinking_prefix("opus"));
+        assert!(!wants_thinking_prefix("claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn test_wants_thinking_prefix_suffix_is_true() {
+        assert!(wants_thinking_prefix("claude-sonnet-5-thinking"));
+        assert!(wants_thinking_prefix("claude-opus-4-6-THINKING"));
+        assert!(wants_thinking_prefix("haiku-thinking"));
+    }
+
+    #[test]
+    fn test_wants_thinking_prefix_gpt_hidden_cot_is_false() {
+        assert!(!wants_thinking_prefix("gpt-5.6-sol-thinking"));
+        assert!(!wants_thinking_prefix("gpt-5-6-luna-thinking"));
     }
 
     #[test]
