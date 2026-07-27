@@ -690,6 +690,24 @@ mod tests {
     }
 
     #[test]
+    fn test_map_model_opus_5() {
+        assert_eq!(
+            map_model("claude-opus-5"),
+            Some("claude-opus-5".to_string())
+        );
+        assert_eq!(
+            map_model("claude-opus-5-thinking"),
+            Some("claude-opus-5".to_string())
+        );
+        assert_eq!(get_context_window_size("claude-opus-5"), 1_000_000);
+        // opus-4-5 不应误匹配为 opus-5
+        assert_eq!(
+            map_model("claude-opus-4-5-20251101"),
+            Some("claude-opus-4.5".to_string())
+        );
+    }
+
+    #[test]
     fn test_map_model_opus_4_8() {
         assert_eq!(
             map_model("claude-opus-4-8"),
