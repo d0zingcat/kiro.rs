@@ -708,6 +708,45 @@ mod tests {
     }
 
     #[test]
+    fn test_map_model_family_aliases() {
+        assert_eq!(map_model("opus"), Some("claude-opus-5".to_string()));
+        assert_eq!(map_model("OPUS"), Some("claude-opus-5".to_string()));
+        assert_eq!(map_model(" opus "), Some("claude-opus-5".to_string()));
+        assert_eq!(map_model("sonnet"), Some("claude-sonnet-5".to_string()));
+        assert_eq!(map_model("SONNET"), Some("claude-sonnet-5".to_string()));
+        assert_eq!(map_model("haiku"), Some("claude-haiku-4.5".to_string()));
+        assert_eq!(map_model("HAIKU"), Some("claude-haiku-4.5".to_string()));
+
+        assert_eq!(get_context_window_size("opus"), 1_000_000);
+        assert_eq!(get_context_window_size("sonnet"), 1_000_000);
+        assert_eq!(get_context_window_size("haiku"), 200_000);
+
+        // 宽兜底不变：无精确版本的旧名不升到最新
+        assert_eq!(
+            map_model("claude-opus-4"),
+            Some("claude-opus-4.6".to_string())
+        );
+        assert_eq!(
+            map_model("claude-sonnet-4"),
+            Some("claude-sonnet-4.5".to_string())
+        );
+
+        // 非精确别名不走别名表
+        assert_eq!(
+            map_model("claude-opus"),
+            Some("claude-opus-4.6".to_string())
+        );
+        assert_eq!(
+            map_model("opus-5"),
+            Some("claude-opus-5".to_string())
+        );
+        assert_eq!(
+            map_model("my-opus"),
+            Some("claude-opus-4.6".to_string())
+        );
+    }
+
+    #[test]
     fn test_map_model_opus_4_8() {
         assert_eq!(
             map_model("claude-opus-4-8"),

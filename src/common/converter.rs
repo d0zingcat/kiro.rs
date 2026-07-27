@@ -80,12 +80,20 @@ fn map_gpt_model(model_lower: &str) -> Option<String> {
 }
 
 /// 模型映射：将 Anthropic/OpenAI 模型名映射到 Kiro 模型 ID
-/// 严格对照版本号
+/// 严格对照版本号；裸别名 opus/sonnet/haiku 映射到当前最新可用模型
 pub fn map_model(model: &str) -> Option<String> {
-    let model_lower = model.to_lowercase();
+    let model_lower = model.trim().to_lowercase();
 
     if let Some(mapped) = map_gpt_model(&model_lower) {
         return Some(mapped);
+    }
+
+    // Claude Code 风格家族别名（精确匹配）
+    match model_lower.as_str() {
+        "opus" => return Some("claude-opus-5".to_string()),
+        "sonnet" => return Some("claude-sonnet-5".to_string()),
+        "haiku" => return Some("claude-haiku-4.5".to_string()),
+        _ => {}
     }
 
     if model_lower.contains("sonnet") {

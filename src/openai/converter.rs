@@ -522,8 +522,14 @@ fn convert_tools(
 ///
 /// 与 Anthropic 侧不同：OpenAI Chat Completions 协议没有显式的 `thinking` 请求字段，
 /// 因此改用模型名后缀 `-thinking`（大小写不敏感）作为开关。
+///
+/// 注意：这里用的是 [`super::thinking::wants_thinking_prefix`]（仅后缀触发），
+/// 而不是 [`super::thinking::is_thinking_model`]（响应拆分用，裸 sonnet/opus
+/// 别名也为 true）——裸别名上游本身默认 adaptive thinking，不需要也不应该
+/// 主动注入 `<thinking_mode>enabled</thinking_mode>`，否则会与 Anthropic 侧行为
+/// 不一致（Anthropic 对裸别名不下发 thinking 配置）。
 fn generate_thinking_prefix_for_model(model: &str) -> Option<String> {
-    if super::thinking::is_thinking_model(model) {
+    if super::thinking::wants_thinking_prefix(model) {
         Some(
             "<thinking_mode>enabled</thinking_mode><max_thinking_length>20000</max_thinking_length>"
                 .to_string(),
@@ -1100,6 +1106,45 @@ mod tests {
             .expect("history should contain a user message");
 
         assert!(first_user.contains("<thinking_mode>enabled</thinking_mode>"));
+    }
+
+    #[test]
+    fn test_bare_sonnet_alias_does_not_inject_prefix() {
+        // 回归测试：is_thinking_model 对裸 sonnet/opus 别名返回 true 是为了响应侧
+        // 拆分 <thinking> 标签，但请求侧不应因此主动注入 <thinking_mode>enabled</thinking_mode>，
+        // 否则会与 Anthropic 兼容层的行为（裸别名不下发 thinking 配置）不一致。
+        assert_eq!(generate_thinking_prefix_for_model("sonnet"), None);
+        assert_eq!(generate_thinking_prefix_for_model("opus"), None);
+
+        let mut req_sonnet = make_request(vec![
+            ChatMessage {
+                role: "system".into(),
+                content: Some(serde_json::json!("You are helpful.")),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+            ChatMessage {
+                role: "user".into(),
+                content: Some(serde_json::json!("Hi")),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+        ]);
+        req_sonnet.model = "sonnet".into();
+        let result = convert_request(&req_sonnet).unwrap();
+        let history = &result.conversation_state.history;
+        let first_user = history
+            .iter()
+            .find_map(|m| match m {
+                crate::kiro::model::requests::conversation::Message::User(u) => {
+                    Some(u.user_input_message.content.clone())
+                }
+                _ => None,
+            })
+            .expect("history should contain a user message");
+        assert!(!first_user.contains("<thinking_mode>"));
     }
 
     #[test]
