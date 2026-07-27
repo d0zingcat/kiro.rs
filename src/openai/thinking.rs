@@ -42,7 +42,14 @@ fn is_quote_char(buffer: &str, pos: usize) -> bool {
         .unwrap_or(false)
 }
 
-/// 判断给定模型名是否为 thinking 模型（模型名包含 `-thinking`，大小写不敏感）
+/// 判断给定模型名是否为 thinking 模型
+///
+/// 命中以下任一条件即视为 thinking 模型：
+/// 1. 模型名包含 `-thinking`（大小写不敏感）；
+/// 2. `map_model` 解析后落在 `claude-sonnet-5` / `claude-opus-5`——这两个家族
+///    上游默认开启 adaptive thinking，即使客户端未显式传 `-thinking` 后缀
+///    （例如裸别名 `sonnet`/`opus`）也会输出 `<thinking>` 标签，必须拆分，
+///    否则会泄漏进 content（与 Anthropic 侧 `should_extract_thinking` 语义一致）。
 ///
 /// GPT-5.6 使用 hidden chain-of-thought，上游不接受 Claude 风格的 thinking 前缀；
 /// 即使客户端误传 `gpt-5.6-*-thinking` 也不应开启标签注入/拆分。
@@ -50,7 +57,13 @@ pub(crate) fn is_thinking_model(model: &str) -> bool {
     if is_gpt_hidden_cot_model(model) {
         return false;
     }
-    model.to_lowercase().contains("-thinking")
+    if model.to_lowercase().contains("-thinking") {
+        return true;
+    }
+    matches!(
+        crate::common::converter::map_model(model).as_deref(),
+        Some("claude-sonnet-5") | Some("claude-opus-5")
+    )
 }
 
 /// GPT-5.6：hidden CoT；Responses 侧也不应转发原生 reasoning SSE（Codex 会报
@@ -395,6 +408,30 @@ mod tests {
         assert!(!is_thinking_model("gpt-5.6-sol-thinking"));
         assert!(!is_thinking_model("gpt-5-6-luna-thinking"));
         assert!(!is_thinking_model("gpt-5.6-terra"));
+    }
+
+    #[test]
+    fn test_is_thinking_model_bare_sonnet_alias_defaults_true() {
+        // sonnet/opus 裸别名经 map_model 解析后落在 claude-sonnet-5/claude-opus-5，
+        // 上游默认 adaptive thinking，响应侧必须拆分 <thinking> 标签，
+        // 否则会泄漏进 content（与 Anthropic 侧 should_extract_thinking 语义保持一致）。
+        assert!(is_thinking_model("sonnet"));
+    }
+
+    #[test]
+    fn test_is_thinking_model_bare_opus_alias_defaults_true() {
+        assert!(is_thinking_model("opus"));
+    }
+
+    #[test]
+    fn test_is_thinking_model_bare_haiku_alias_defaults_false() {
+        // haiku 映射到 claude-haiku-4.5，不属于默认 adaptive thinking 家族
+        assert!(!is_thinking_model("haiku"));
+    }
+
+    #[test]
+    fn test_is_thinking_model_haiku_thinking_suffix_still_true() {
+        assert!(is_thinking_model("haiku-thinking"));
     }
 
     #[test]

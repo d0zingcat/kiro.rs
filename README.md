@@ -581,7 +581,7 @@ GPT-5.6 系列（Sol / Terra / Luna）于 2026-07-13 在 Kiro 上线，状态为
 
 与 **Codex CLI**（`wire_api = "responses"`）联用时，GPT-5.6 走 Responses Lite 工具协议；kiro.rs 的适配策略（吸收 `additional_tools`、`exec` ↔ `custom_tool_call`）见 [docs/e2e-codex.md §8.1](docs/e2e-codex.md#81-codex-responses-lite--gpt-56-适配策略)。完整 E2E 流程与实测记录见 [docs/e2e-codex.md](docs/e2e-codex.md)。
 
-Sonnet 5 的 thinking 行为与已知限制见 [docs/claude-sonnet-5.md](docs/claude-sonnet-5.md)。
+Sonnet 5 的 thinking 行为与已知限制见 [docs/claude-sonnet-5.md](docs/claude-sonnet-5.md)。OpenAI 路径对映射到 Sonnet 5 / Opus 5 的请求也会拆分 thinking 块（与 Anthropic 侧一致）。
 
 ## Admin（可选）
 
