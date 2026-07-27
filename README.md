@@ -562,14 +562,20 @@ OpenAI 端点补充说明：
 | `*gpt-5.6*sol*` / `gpt-5-6-sol` / `openai.gpt-5.6-sol` | `gpt-5.6-sol` |
 | `*gpt-5.6*terra*` / `gpt-5-6-terra` / `openai.gpt-5.6-terra` | `gpt-5.6-terra` |
 | `*gpt-5.6*luna*` / `gpt-5-6-luna` / `openai.gpt-5.6-luna` | `gpt-5.6-luna` |
+| `opus`（精确匹配，Claude Code 家族别名） | `claude-opus-5` |
+| `sonnet`（精确匹配，Claude Code 家族别名） | `claude-sonnet-5` |
+| `haiku`（精确匹配，Claude Code 家族别名） | `claude-haiku-4.5` |
 | `*sonnet-5*` | `claude-sonnet-5` |
 | `*sonnet*`（含 4.6/4-6） | `claude-sonnet-4.6` |
 | `*sonnet*`（含 4.5/4-5） | `claude-sonnet-4.5` |
+| `*opus-5*` | `claude-opus-5` |
 | `*opus*`（含 4.8/4-8） | `claude-opus-4.8` |
 | `*opus*`（含 4.7/4-7） | `claude-opus-4.7` |
 | `*opus*`（含 4.6/4-6） | `claude-opus-4.6` |
 | `*opus*`（含 4.5/4-5） | `claude-opus-4.5` |
 | `*haiku*` | `claude-haiku-4.5` |
+
+裸别名 `opus`/`sonnet`/`haiku` 精确匹配（trim、大小写不敏感），对齐 Claude Code 家族别名。
 
 GPT-5.6 系列（Sol / Terra / Luna）于 2026-07-13 在 Kiro 上线，状态为 Experimental，上下文窗口 272K，仅 `us-east-1` / `eu-central-1` 可用。上游使用 hidden chain-of-thought，**不提供** Claude 风格的 `-thinking` 后缀或 effort 级别。
 

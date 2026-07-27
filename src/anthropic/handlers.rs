@@ -21,7 +21,7 @@ use std::time::Duration;
 use tokio::time::interval;
 use uuid::Uuid;
 
-use super::converter::{ConversionError, convert_request};
+use super::converter::{ConversionError, convert_request, map_model};
 use super::middleware::AppState;
 use super::stream::{BufferedStreamContext, SseEvent, StreamContext};
 use super::types::{CountTokensRequest, CountTokensResponse, ErrorResponse, MessagesRequest, Model, ModelsResponse, OutputConfig, Thinking};
@@ -763,18 +763,26 @@ async fn handle_non_stream_request(
 
 /// 判断响应解析侧是否应启用 thinking 块拆分
 ///
-/// - Sonnet 5：上游默认 adaptive thinking，即使客户端不传 `thinking` 字段也会
-///   输出 `<thinking>` 标签。因此在响应侧默认视 `thinking_enabled = true`，
+/// - Sonnet 5 / Opus 5（含裸别名 `sonnet`/`opus`，经 `map_model` 解析后判断）：
+///   上游默认 adaptive thinking，即使客户端不传 `thinking` 字段也会输出
+///   `<thinking>` 标签。因此在响应侧默认视 `thinking_enabled = true`，
 ///   以便正确拆分 thinking 块（参见 `docs/claude-sonnet-5.md` Known Gap #2），
 ///   除非客户端显式 `type = "disabled"`。
 /// - 其他模型：仅当客户端显式 enabled/adaptive 时启用。
+///
+/// 注意：判断依据是 `map_model` 解析后的上游模型 ID，而非客户端原始字符串，
+/// 这样 `sonnet`/`opus` 等裸别名才能正确命中默认 adaptive thinking 行为。
 fn should_extract_thinking(model: &str, thinking: &Option<Thinking>) -> bool {
     let model_lower = model.to_lowercase();
     // GPT-5.6: hidden CoT，响应侧不拆分 thinking 块
     if model_lower.contains("gpt-5.6") || model_lower.contains("gpt-5-6") {
         return false;
     }
-    if model_lower.contains("sonnet-5") {
+    let is_default_adaptive_family = matches!(
+        map_model(model).as_deref(),
+        Some("claude-sonnet-5") | Some("claude-opus-5")
+    );
+    if is_default_adaptive_family {
         thinking
             .as_ref()
             .map(|t| t.thinking_type != "disabled")
@@ -804,10 +812,13 @@ fn override_thinking_from_model_name(payload: &mut MessagesRequest) {
         return;
     }
 
-    let is_adaptive_thinking = (model_lower.contains("opus")
-        && (model_lower.contains("4-6") || model_lower.contains("4.6")))
-        || model_lower.contains("sonnet-5")
-        || model_lower.contains("opus-5");
+    let is_opus_4_6_adaptive =
+        model_lower.contains("opus") && (model_lower.contains("4-6") || model_lower.contains("4.6"));
+    let is_mapped_adaptive_family = matches!(
+        map_model(&payload.model).as_deref(),
+        Some("claude-sonnet-5") | Some("claude-opus-5")
+    );
+    let is_adaptive_thinking = is_opus_4_6_adaptive || is_mapped_adaptive_family;
 
     let thinking_type = if is_adaptive_thinking {
         "adaptive"
@@ -1118,4 +1129,81 @@ fn create_buffered_sse_stream(
         },
     )
     .flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn disabled_thinking() -> Thinking {
+        Thinking {
+            thinking_type: "disabled".to_string(),
+            budget_tokens: 0,
+        }
+    }
+
+    fn enabled_thinking() -> Thinking {
+        Thinking {
+            thinking_type: "enabled".to_string(),
+            budget_tokens: 20000,
+        }
+    }
+
+    #[test]
+    fn test_should_extract_thinking_bare_sonnet_alias_defaults_true() {
+        assert!(should_extract_thinking("sonnet", &None));
+    }
+
+    #[test]
+    fn test_should_extract_thinking_bare_opus_alias_defaults_true() {
+        assert!(should_extract_thinking("opus", &None));
+    }
+
+    #[test]
+    fn test_should_extract_thinking_bare_sonnet_alias_disabled() {
+        assert!(!should_extract_thinking(
+            "sonnet",
+            &Some(disabled_thinking())
+        ));
+    }
+
+    #[test]
+    fn test_should_extract_thinking_bare_opus_alias_disabled() {
+        assert!(!should_extract_thinking("opus", &Some(disabled_thinking())));
+    }
+
+    #[test]
+    fn test_should_extract_thinking_case_insensitive_and_trimmed_alias() {
+        assert!(should_extract_thinking("SONNET", &None));
+        assert!(should_extract_thinking(" opus ", &None));
+    }
+
+    #[test]
+    fn test_should_extract_thinking_claude_sonnet_5_unchanged() {
+        assert!(should_extract_thinking("claude-sonnet-5", &None));
+        assert!(!should_extract_thinking(
+            "claude-sonnet-5",
+            &Some(disabled_thinking())
+        ));
+    }
+
+    #[test]
+    fn test_should_extract_thinking_claude_opus_5_thinking_suffix() {
+        assert!(should_extract_thinking("claude-opus-5-thinking", &None));
+    }
+
+    #[test]
+    fn test_should_extract_thinking_gpt_hidden_cot_still_false() {
+        assert!(!should_extract_thinking(
+            "gpt-5.6-sol",
+            &Some(enabled_thinking())
+        ));
+    }
+
+    #[test]
+    fn test_should_extract_thinking_other_model_requires_explicit_enable() {
+        // haiku 不属于默认 adaptive thinking 家族，需显式开启
+        assert!(!should_extract_thinking("haiku", &None));
+        assert!(should_extract_thinking("haiku", &Some(enabled_thinking())));
+    }
 }
