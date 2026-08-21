@@ -98,6 +98,13 @@ pub struct Config {
     #[serde(default = "default_extract_thinking")]
     pub extract_thinking: bool,
 
+    /// Codex `codex-auto-review`（Guardian / approve-for-me）映射到的 Kiro wire 模型。
+    ///
+    /// 接受与普通 API 客户端相同的模型名/别名；省略时默认 `gpt-5.6-sol`。
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codex_auto_review_model: Option<String>,
+
     /// 默认端点名称（凭据未显式指定 endpoint 时使用，默认 "ide"）
     #[serde(default = "default_endpoint")]
     pub default_endpoint: String,
@@ -182,6 +189,7 @@ impl Default for Config {
             admin_api_key: None,
             load_balancing_mode: default_load_balancing_mode(),
             extract_thinking: default_extract_thinking(),
+            codex_auto_review_model: None,
             default_endpoint: default_endpoint(),
             endpoints: HashMap::new(),
             config_path: None,

@@ -3,6 +3,7 @@
 //! Anthropic 和 OpenAI 兼容层共享的转换逻辑
 
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 
 use sha2::{Digest, Sha256};
 
@@ -57,6 +58,42 @@ impl std::fmt::Display for ConversionError {
 
 impl std::error::Error for ConversionError {}
 
+/// Codex Guardian / `--approve-for-me` 使用的内部审核模型 ID。
+///
+/// 该 slug 仅存在于 Codex 控制面，Kiro 上游无同名模型；需映射到可 servable 的 wire 模型
+/// （Guardian 只需输出短 JSON 裁决，见 Codex `core/src/guardian/review.rs`）。
+pub const CODEX_AUTO_REVIEW_MODEL_ID: &str = "codex-auto-review";
+
+/// 未配置 `codexAutoReviewModel` 时，`codex-auto-review` 的默认 wire 目标（与官方 GPT 线对齐）。
+pub const DEFAULT_CODEX_AUTO_REVIEW_WIRE_MODEL: &str = "gpt-5.6-sol";
+
+static CODEX_AUTO_REVIEW_WIRE_OVERRIDE: OnceLock<String> = OnceLock::new();
+
+fn codex_auto_review_wire_model() -> &'static str {
+    CODEX_AUTO_REVIEW_WIRE_OVERRIDE
+        .get()
+        .map(String::as_str)
+        .unwrap_or(DEFAULT_CODEX_AUTO_REVIEW_WIRE_MODEL)
+}
+
+/// 启动时由 `config.json` 的 `codexAutoReviewModel` 初始化审核模型 wire 映射。
+///
+/// 接受与普通客户端相同的模型名/别名（如 `gpt-5.6-terra`、`claude-haiku-4.5`）；
+/// 省略或留空则使用 [`DEFAULT_CODEX_AUTO_REVIEW_WIRE_MODEL`]。
+pub fn configure_codex_auto_review_wire_model(configured: Option<&str>) {
+    let _ = CODEX_AUTO_REVIEW_WIRE_OVERRIDE.set(resolve_codex_auto_review_wire_model(configured));
+}
+
+pub fn resolve_codex_auto_review_wire_model(configured: Option<&str>) -> String {
+    configured
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| {
+            map_client_model(value).or_else(|| Some(value.to_string()))
+        })
+        .unwrap_or_else(|| DEFAULT_CODEX_AUTO_REVIEW_WIRE_MODEL.to_string())
+}
+
 /// 将 GPT 模型名映射到 Kiro 上游 wire ID（`gpt-5.6-{sol,terra,luna}`）
 fn map_gpt_model(model_lower: &str) -> Option<String> {
     let model_lower = model_lower.strip_prefix("openai.").unwrap_or(model_lower);
@@ -82,6 +119,16 @@ fn map_gpt_model(model_lower: &str) -> Option<String> {
 /// 模型映射：将 Anthropic/OpenAI 模型名映射到 Kiro 模型 ID
 /// 严格对照版本号；裸别名 opus/sonnet/haiku 映射到当前最新可用模型
 pub fn map_model(model: &str) -> Option<String> {
+    let model_lower = model.trim().to_lowercase();
+
+    if model_lower == CODEX_AUTO_REVIEW_MODEL_ID {
+        return Some(codex_auto_review_wire_model().to_string());
+    }
+
+    map_client_model(model)
+}
+
+fn map_client_model(model: &str) -> Option<String> {
     let model_lower = model.trim().to_lowercase();
 
     if let Some(mapped) = map_gpt_model(&model_lower) {

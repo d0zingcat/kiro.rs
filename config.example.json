@@ -5,5 +5,6 @@
   "tlsBackend": "rustls",
   "region": "us-east-1",
   "adminApiKey": "sk-admin-your-secret-key",
-  "defaultEndpoint": "ide"
+  "defaultEndpoint": "ide",
+  "codexAutoReviewModel": "gpt-5.6-sol"
 }

@@ -625,6 +625,36 @@ mod tests {
     }
 
     #[test]
+    fn test_map_model_codex_auto_review_default() {
+        assert_eq!(
+            map_model("codex-auto-review"),
+            Some("gpt-5.6-sol".to_string())
+        );
+        assert_eq!(
+            map_model("CODEX-AUTO-REVIEW"),
+            Some("gpt-5.6-sol".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_codex_auto_review_wire_model() {
+        use crate::common::converter::resolve_codex_auto_review_wire_model;
+
+        assert_eq!(
+            resolve_codex_auto_review_wire_model(None),
+            "gpt-5.6-sol".to_string()
+        );
+        assert_eq!(
+            resolve_codex_auto_review_wire_model(Some("gpt-5.6-terra")),
+            "gpt-5.6-terra".to_string()
+        );
+        assert_eq!(
+            resolve_codex_auto_review_wire_model(Some("haiku")),
+            "claude-haiku-4.5".to_string()
+        );
+    }
+
+    #[test]
     fn test_map_model_gpt56() {
         assert_eq!(
             map_model("gpt-5.6-sol"),

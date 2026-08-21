@@ -24,6 +24,8 @@ use uuid::Uuid;
 use super::converter::{ConversionError, convert_request, map_model};
 use super::middleware::AppState;
 use super::stream::{BufferedStreamContext, SseEvent, StreamContext};
+use crate::common::converter::CODEX_AUTO_REVIEW_MODEL_ID;
+
 use super::types::{CountTokensRequest, CountTokensResponse, ErrorResponse, MessagesRequest, Model, ModelsResponse, OutputConfig, Thinking};
 use super::usage::build_usage_value;
 use super::websearch;
@@ -75,6 +77,15 @@ pub async fn get_models() -> impl IntoResponse {
     tracing::info!("Received GET /v1/models request");
 
     let models = vec![
+        Model {
+            id: CODEX_AUTO_REVIEW_MODEL_ID.to_string(),
+            object: "model".to_string(),
+            created: 1783900800, // Jul 13, 2026
+            owned_by: "openai".to_string(),
+            display_name: "Codex Auto Review".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 64_000,
+        },
         Model {
             id: "claude-opus-5".to_string(),
             object: "model".to_string(),
