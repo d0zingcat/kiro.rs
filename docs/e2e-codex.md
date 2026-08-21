@@ -312,6 +312,51 @@ Codex 期望类似 `{ "models": [...] }`，kiro.rs 的 `GET /v1/models` 返回 A
 
 若要消除噪音，可后续为 Codex 增加兼容字段或独立 models 视图（未做）。
 
+### 9.4 `--approve-for-me` / Guardian 自动审核
+
+Codex v0.147+ 的 **Approve for me**（`approvals_reviewer = "auto_review"` 或 CLI `--approve-for-me`）会 spawn 一个 Guardian 子会话，向当前 `model_provider` 发送 **`model: codex-auto-review`** 的 Responses 请求。这是 Codex 控制面专用 slug，不是 OpenAI 公开模型名；官方 ChatGPT 后端能识别，第三方 OpenAI 兼容代理通常不能。
+
+**kiro.rs 处理方式**（2026-08 起）：
+
+| 客户端 model | Kiro wire 模型（默认） | 说明 |
+|---|---|---|
+| `codex-auto-review` | `gpt-5.6-sol` | 与官方 GPT 审核线对齐；可在 kiro `config.json` 覆盖 |
+
+- `GET /v1/models` 已列出 `codex-auto-review`，便于 Codex / 网关做模型发现。
+- 若未映射，Guardian 请求会 422（`Model not supported`），Codex **fail-closed** 会把待审批操作判为高风险拒绝，表现为 approve-for-me「不工作」。
+
+**kiro.rs `config.json`（可选）**：
+
+```json
+{
+  "codexAutoReviewModel": "gpt-5.6-sol"
+}
+```
+
+省略该项时默认即为 `gpt-5.6-sol`；可改为 `gpt-5.6-terra`、`claude-haiku-4.5` 等任意 kiro 可映射的模型名。
+
+**Codex 侧：如何开启 approve-for-me**（kiro.rs **不需要**改 Codex 配置也能做模型映射；下列是 Codex 客户端侧开关，三选一即可）：
+
+| 方式 | 作用 |
+|---|---|
+| Desktop / TUI 权限控件选 **Approve for me** | 当前会话 `approvals_reviewer = "auto_review"` |
+| CLI `--approve-for-me` | 单次会话等价于上项（v0.147+） |
+| `~/.codex/config.toml` 写 `approvals_reviewer = "auto_review"` | 持久默认（你当前是 `"user"`，需改或靠 UI/CLI 覆盖） |
+
+还需 `approval_policy = "on-request"`（或仍会弹出审批类别的 granular policy），否则没有可审核的 escalation。示例：
+
+```toml
+approval_policy = "on-request"
+# approvals_reviewer = "auto_review"   # 可选：持久默认；也可只在 UI/CLI 选 Approve for me
+
+[model_providers.kiro]
+name = "kiro-rs local"
+base_url = "http://127.0.0.1:8990/v1"
+wire_api = "responses"
+```
+
+**已知限制**：Codex 内置 catalog 仍含 `codex-auto-review`，`ModelsManager::list_models` 不会按「当前 provider 是否真能 serve」过滤（见 [openai/codex#31732](https://github.com/openai/codex/issues/31732)）。kiro.rs 通过 wire 映射规避；若需改用其他审核后端，可在网关层把 `codex-auto-review` alias 到目标模型。
+
 ### 9.2 `reasoningContentEvent`
 
 上游（例如 Opus 4.8）会推送：

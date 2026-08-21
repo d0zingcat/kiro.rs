@@ -43,6 +43,16 @@ async fn main() {
         std::process::exit(1);
     });
 
+    common::converter::configure_codex_auto_review_wire_model(
+        config.codex_auto_review_model.as_deref(),
+    );
+    if let Some(model) = config.codex_auto_review_model.as_deref() {
+        tracing::info!(
+            configured = %model,
+            "Codex auto-review 模型映射已加载"
+        );
+    }
+
     // 加载凭证（支持单对象或数组格式）
     let credentials_path = args
         .credentials
