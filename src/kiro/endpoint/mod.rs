@@ -73,8 +73,12 @@ pub struct RequestContext<'a> {
 /// 默认的 MONTHLY_REQUEST_COUNT 判断逻辑
 ///
 /// 同时识别顶层 `reason` 字段和嵌套 `error.reason` 字段。
+/// 除月度配额（`MONTHLY_REQUEST_COUNT`）外，超额耗尽（`OVERAGE_REQUEST_LIMIT_EXCEEDED`）
+/// 同样视为额度用尽并触发凭据禁用与故障转移（实测：耗尽的 API Key 返回
+/// `402 + {"reason":"OVERAGE_REQUEST_LIMIT_EXCEEDED"}`，旧逻辑无法识别）。
 pub fn default_is_monthly_request_limit(body: &str) -> bool {
-    if body.contains("MONTHLY_REQUEST_COUNT") {
+    if body.contains("MONTHLY_REQUEST_COUNT") || body.contains("OVERAGE_REQUEST_LIMIT_EXCEEDED")
+    {
         return true;
     }
 
@@ -85,7 +89,7 @@ pub fn default_is_monthly_request_limit(body: &str) -> bool {
     if value
         .get("reason")
         .and_then(|v| v.as_str())
-        .is_some_and(|v| v == "MONTHLY_REQUEST_COUNT")
+        .is_some_and(is_quota_exhausted_reason)
     {
         return true;
     }
@@ -93,7 +97,12 @@ pub fn default_is_monthly_request_limit(body: &str) -> bool {
     value
         .pointer("/error/reason")
         .and_then(|v| v.as_str())
-        .is_some_and(|v| v == "MONTHLY_REQUEST_COUNT")
+        .is_some_and(is_quota_exhausted_reason)
+}
+
+/// 配额耗尽类 reason 判定（月度配额 + 超额耗尽）
+fn is_quota_exhausted_reason(reason: &str) -> bool {
+    reason == "MONTHLY_REQUEST_COUNT" || reason == "OVERAGE_REQUEST_LIMIT_EXCEEDED"
 }
 
 /// 默认的 bearer token 失效判断逻辑
@@ -121,6 +130,19 @@ mod tests {
     fn test_default_monthly_request_limit_false() {
         let body = r#"{"message":"nope","reason":"DAILY_REQUEST_COUNT"}"#;
         assert!(!default_is_monthly_request_limit(body));
+    }
+
+    #[test]
+    fn test_overage_limit_exceeded_detects_reason() {
+        // 实测耗尽 Key 返回的 body
+        let body = r#"{"message":"You have reached the limit for overages.","reason":"OVERAGE_REQUEST_LIMIT_EXCEEDED"}"#;
+        assert!(default_is_monthly_request_limit(body));
+    }
+
+    #[test]
+    fn test_overage_limit_exceeded_nested_reason() {
+        let body = r#"{"error":{"reason":"OVERAGE_REQUEST_LIMIT_EXCEEDED"}}"#;
+        assert!(default_is_monthly_request_limit(body));
     }
 
     #[test]
