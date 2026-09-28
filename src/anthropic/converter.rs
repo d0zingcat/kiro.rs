@@ -720,6 +720,28 @@ mod tests {
     }
 
     #[test]
+    fn test_map_model_opus_5_5() {
+        for name in [
+            "claude-opus-5-5",
+            "claude-opus-5.5",
+            "claude-opus-5-5-thinking",
+            "claude-opus-5.5-20260922",
+        ] {
+            assert_eq!(
+                map_model(name),
+                Some("claude-opus-5.5".to_string()),
+                "{name} should map to claude-opus-5.5"
+            );
+        }
+        assert_eq!(get_context_window_size("claude-opus-5-5"), 1_000_000);
+        // opus-5 不应被 5.5 分支吞掉
+        assert_eq!(
+            map_model("claude-opus-5"),
+            Some("claude-opus-5".to_string())
+        );
+    }
+
+    #[test]
     fn test_map_model_opus_5() {
         assert_eq!(
             map_model("claude-opus-5"),

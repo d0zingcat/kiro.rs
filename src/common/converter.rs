@@ -155,7 +155,10 @@ fn map_client_model(model: &str) -> Option<String> {
             Some("claude-sonnet-4.5".to_string())
         }
     } else if model_lower.contains("opus") {
-        if model_lower.contains("opus-5") {
+        // 5.5 必须先于 opus-5 判断：`contains("opus-5")` 会同时匹配 opus-5.5
+        if model_lower.contains("opus-5-5") || model_lower.contains("opus-5.5") {
+            Some("claude-opus-5.5".to_string())
+        } else if model_lower.contains("opus-5") {
             Some("claude-opus-5".to_string())
         } else if model_lower.contains("4-5") || model_lower.contains("4.5") {
             Some("claude-opus-4.5".to_string())
@@ -187,6 +190,7 @@ pub fn get_context_window_size(model: &str) -> i32 {
         Some(mapped)
             if mapped == "claude-sonnet-5"
                 || mapped == "claude-sonnet-4.6"
+                || mapped == "claude-opus-5.5"
                 || mapped == "claude-opus-5"
                 || mapped == "claude-opus-4.6"
                 || mapped == "claude-opus-4.7"
